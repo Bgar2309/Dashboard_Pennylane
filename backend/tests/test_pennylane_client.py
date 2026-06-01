@@ -420,7 +420,7 @@ def test_list_open_invoices_fifo_partial_payment(client):
     assert inv.customer_name == "SIGNAL ET DECO"
     assert inv.amount == Decimal("1875.6")           # montant débit d'origine
     assert inv.remaining_amount == Decimal("1575.6")  # reliquat après FIFO
-    assert inv.number == "70002"  # libellé sans n° -> id de l'écriture
+    assert inv.number == "Facture du 10/02/2026"  # date de la ligne affichée
     assert inv.currency == "EUR"
     assert inv.paid is False
     assert inv.date == date(2026, 2, 10)
@@ -443,9 +443,9 @@ def test_opening_balance_not_displayable_and_carry_forward(client):
     # La ligne A-Nouveau (5008) n'est jamais une facture affichable.
     assert 5008 not in ids
 
-    # La facture réelle 5009 reste due, n° extrait du libellé.
+    # La facture réelle 5009 reste due, n° = date de la ligne affichée.
     fac = next(i for i in invoices if i.id == 5009)
-    assert fac.number == "260500"
+    assert fac.number == "Facture du 01/02/2026"
     assert fac.amount == Decimal("800.0")
     assert fac.remaining_amount == Decimal("800.0")
 
