@@ -19,6 +19,7 @@ Le filtre ``since`` utilise le format de filtre brut v2 :
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
@@ -154,9 +155,42 @@ class PennylaneClient:
         email = emails[0] if emails else None
         return Customer(id=raw["id"], name=raw.get("name") or "", email=email)
 
+    @staticmethod
+    def _name_from_label(label: Any, number: Any) -> str:
+        """Extrait le nom client du libellé d'une facture, quand l'objet
+        ``customer`` est ``null``.
+
+        Format observé : « Facture <NOM> - <numero> » (libellé généré). On prend
+        ce qui se trouve entre « Facture » et « - <numero> ». Si rien
+        d'exploitable, rend une chaîne vide.
+        """
+        if not label:
+            return ""
+        text = str(label).strip()
+        # Retire le préfixe « Facture » (insensible à la casse).
+        prefix = re.match(r"(?i)^facture\b\s*", text)
+        if prefix:
+            text = text[prefix.end():]
+        # Retire le suffixe « - <numero> » (n° exact si connu, sinon - <chiffres>).
+        if number:
+            text = re.sub(rf"\s*-\s*{re.escape(str(number))}\s*$", "", text)
+        text = re.sub(r"\s*-\s*\d+\s*$", "", text)
+        return text.strip()
+
     def _map_invoice(self, raw: dict[str, Any], names: dict[int, str]) -> Invoice:
         customer = raw.get("customer") or {}
         customer_id = customer.get("id") or 0
+
+        # Résolution du nom : 1) index /customers via customer.id ;
+        # 2) extraction depuis le libellé (factures à customer null) ;
+        # 3) « Client inconnu » (id 0) en dernier recours — JAMAIS écarter.
+        customer_name = names.get(customer_id, "") if customer_id else ""
+        if not customer_name:
+            customer_name = self._name_from_label(
+                raw.get("label"), raw.get("invoice_number"))
+        if not customer_name:
+            customer_name = "Client inconnu"
+            customer_id = 0
 
         # remaining_amount : fourni par l'API (TTC) ; sinon amount si non payé.
         if raw.get("remaining_amount_with_tax") is not None:
@@ -170,7 +204,7 @@ class PennylaneClient:
             id=raw["id"],
             number=raw.get("invoice_number") or raw.get("label") or str(raw["id"]),
             customer_id=customer_id,
-            customer_name=names.get(customer_id, ""),
+            customer_name=customer_name,
             date=self._date(raw.get("date")) or date.min,
             due_date=self._date(raw.get("deadline")),
             amount=self._decimal(raw.get("amount")),
@@ -216,7 +250,10 @@ class PennylaneClient:
     def list_open_invoices(self) -> list[Invoice]:
         """Factures clients non soldées (remaining_amount > 0). Pagine tout.
 
-        On exclut les brouillons (``draft``) : ce ne sont pas des créances réelles.
+        Critère unique : ``draft == false`` ET ``remaining_amount_with_tax > 0``.
+        On NE filtre PAS sur ``status`` : les impayées anciennes portent souvent
+        ``status: "archived"`` (ou ``late`` / ``upcoming``) et doivent être
+        incluses. Seuls les brouillons sont exclus (pas des créances réelles).
         """
         names = self._customer_names_map()
         out: list[Invoice] = []

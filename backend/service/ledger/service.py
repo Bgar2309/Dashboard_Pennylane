@@ -12,7 +12,9 @@ from datetime import date
 from decimal import Decimal
 
 from core.aging import bucket_for, level_for
-from core.models import AgingBucket, Customer, CustomerDunningRow, Invoice
+from core.models import (AgingBucket, Customer, CustomerDunningRow,
+                         CustomerStatement, Invoice, PaymentMatch,
+                         StatementEntry)
 from integration.pennylane import PennylaneClient
 from storage import Storage
 
@@ -65,7 +67,10 @@ class LedgerService:
         """
         invoices = self.get_open_invoices()
 
-        # Regroupe en préservant l'ordre d'apparition des clients.
+        # Regroupe par customer_id (jamais par nom) en préservant l'ordre
+        # d'apparition : aucune facture n'est perdue. Les factures « Client
+        # inconnu » portent customer_id == 0 et forment donc leur propre ligne,
+        # visible comme les autres.
         groups: dict[int, list[Invoice]] = {}
         for inv in invoices:
             groups.setdefault(inv.customer_id, []).append(inv)
@@ -98,3 +103,77 @@ class LedgerService:
                 blocked_by_payment=False,
             ))
         return rows
+
+    # ------------------------------------------------------------------ #
+    # Relevé de compte client
+    # ------------------------------------------------------------------ #
+    def build_statement(self, customer_id: int) -> CustomerStatement:
+        """Relevé de compte complet d'un client.
+
+        Fusionne TOUTES ses factures (payées ET impayées, archivées comprises)
+        et tous les paiements rapprochés le concernant en une suite d'écritures
+        triées par date croissante. Une facture est portée au débit (créance),
+        un paiement au crédit (règlement). Chaque écriture porte le solde
+        courant cumulé ; le relevé porte le solde final.
+        """
+        invoices = [inv for inv in self._pennylane.list_all_invoices()
+                    if inv.customer_id == customer_id]
+        matches = self._matches_for_customer(customer_id, invoices)
+
+        entries: list[StatementEntry] = []
+        for inv in invoices:
+            entries.append(StatementEntry(
+                date=inv.date,
+                type="facture",
+                label=f"Facture {inv.number}",
+                number=inv.number,
+                debit=inv.amount,
+                credit=None,
+                balance=Decimal("0"),
+            ))
+        for m in matches:
+            entries.append(StatementEntry(
+                date=m.date or date.min,
+                type="paiement",
+                label=self._payment_label(m),
+                number=m.invoice_number,
+                debit=None,
+                credit=m.amount,
+                balance=Decimal("0"),
+            ))
+
+        # Tri par date croissante ; à date égale, la facture précède le paiement.
+        entries.sort(key=lambda e: (e.date, 0 if e.type == "facture" else 1))
+
+        balance = Decimal("0")
+        for e in entries:
+            balance += (e.debit or Decimal("0")) - (e.credit or Decimal("0"))
+            e.balance = balance
+
+        name = invoices[0].customer_name if invoices else ""
+        return CustomerStatement(
+            customer=Customer(id=customer_id, name=name),
+            entries=entries,
+            final_balance=balance,
+        )
+
+    def _matches_for_customer(self, customer_id: int,
+                              invoices: list[Invoice]) -> list[PaymentMatch]:
+        """Paiements rapprochés concernant ce client : un match est retenu si
+        sa facture appartient au client (invoice_id) ou si son nom client
+        correspond. Les matchs sans rattachement (confidence NONE) sont ignorés.
+        """
+        invoice_ids = {inv.id for inv in invoices}
+        names = {inv.customer_name for inv in invoices if inv.customer_name}
+        out: list[PaymentMatch] = []
+        for m in self._storage.list_matches():
+            if (m.invoice_id is not None and m.invoice_id in invoice_ids) or \
+               (m.customer_name and m.customer_name in names):
+                out.append(m)
+        return out
+
+    @staticmethod
+    def _payment_label(m: PaymentMatch) -> str:
+        if m.invoice_number:
+            return f"Règlement facture {m.invoice_number}"
+        return f"Règlement {m.bank_ref}"

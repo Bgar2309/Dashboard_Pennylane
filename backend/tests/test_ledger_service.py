@@ -10,7 +10,8 @@ from decimal import Decimal
 
 import pytest
 
-from core.models import AgingBucket, Invoice, ReminderLevel
+from core.models import (AgingBucket, Invoice, MatchConfidence, PaymentMatch,
+                         ReminderLevel)
 from service.ledger import LedgerService
 from storage import Storage
 
@@ -20,13 +21,18 @@ TODAY = date(2026, 6, 1)
 class FakePennylane:
     """Faux client : rend une liste fixe et compte les appels réseau."""
 
-    def __init__(self, invoices: list[Invoice]) -> None:
+    def __init__(self, invoices: list[Invoice],
+                 all_invoices: list[Invoice] | None = None) -> None:
         self._invoices = invoices
+        self._all_invoices = all_invoices if all_invoices is not None else invoices
         self.calls = 0
 
     def list_open_invoices(self) -> list[Invoice]:
         self.calls += 1
         return list(self._invoices)
+
+    def list_all_invoices(self, since=None) -> list[Invoice]:
+        return list(self._all_invoices)
 
 
 def _inv(id_: int, customer_id: int, customer_name: str,
@@ -154,3 +160,92 @@ def test_build_dunning_rows_no_history_or_bank(storage):
 def test_build_dunning_rows_empty(storage):
     svc = LedgerService(FakePennylane([]), storage)
     assert svc.build_dunning_rows(TODAY) == []
+
+
+# --- build_dunning_rows : « Client inconnu » (id 0) forme sa propre ligne ---
+def test_build_dunning_rows_unknown_customer_is_its_own_row(storage):
+    invoices = [
+        _inv(1, 100, "ACME", date(2026, 5, 20), "100.00"),
+        _inv(2, 0, "Client inconnu", date(2026, 5, 20), "50.00"),
+        _inv(3, 0, "Client inconnu", date(2026, 5, 20), "25.00"),
+    ]
+    svc = LedgerService(FakePennylane(invoices), storage)
+    rows = {r.customer.id: r for r in svc.build_dunning_rows(TODAY)}
+    assert set(rows) == {100, 0}
+    unknown = rows[0]
+    assert unknown.customer.name == "Client inconnu"
+    assert unknown.total_due == Decimal("75.00")  # les 2 factures regroupées
+    assert {i.id for i in unknown.open_invoices} == {2, 3}
+
+
+# --- build_statement : relevé de compte client (factures + paiements) ---
+def _paid_inv(id_: int, customer_id: int, name: str, inv_date: date,
+              amount: str, remaining: str, paid: bool) -> Invoice:
+    return Invoice(
+        id=id_, number=str(id_), customer_id=customer_id, customer_name=name,
+        date=inv_date, due_date=inv_date, amount=Decimal(amount),
+        currency="EUR", paid=paid, remaining_amount=Decimal(remaining),
+    )
+
+
+def test_build_statement_mixes_invoices_and_payments_sorted(storage):
+    # Deux factures (une payée, une partiellement réglée) pour le client 100.
+    all_invoices = [
+        _paid_inv(1, 100, "ACME", date(2026, 1, 10), "1000.00", "0.00", True),
+        _paid_inv(2, 100, "ACME", date(2026, 3, 1), "500.00", "200.00", False),
+        _paid_inv(9, 200, "AUTRE", date(2026, 2, 1), "300.00", "300.00", False),
+    ]
+    # Paiements rapprochés : un sur la facture 1 (par invoice_id), un par nom.
+    storage.save_matches([
+        PaymentMatch(
+            bank_ref="HSBC-1", invoice_id=1, invoice_number="1",
+            customer_name="ACME", amount=Decimal("1000.00"),
+            confidence=MatchConfidence.STRONG, matched_invoice_numbers=["1"],
+            reason="ok", date=date(2026, 1, 20),
+        ),
+        PaymentMatch(
+            bank_ref="HSBC-2", invoice_id=None, invoice_number="2",
+            customer_name="ACME", amount=Decimal("300.00"),
+            confidence=MatchConfidence.MEDIUM, matched_invoice_numbers=["2"],
+            reason="ok", date=date(2026, 3, 15),
+        ),
+        # Paiement d'un AUTRE client : ne doit PAS apparaître dans ce relevé.
+        PaymentMatch(
+            bank_ref="HSBC-9", invoice_id=9, invoice_number="9",
+            customer_name="AUTRE", amount=Decimal("300.00"),
+            confidence=MatchConfidence.STRONG, matched_invoice_numbers=["9"],
+            reason="ok", date=date(2026, 2, 10),
+        ),
+    ])
+
+    svc = LedgerService(FakePennylane([], all_invoices=all_invoices), storage)
+    statement = svc.build_statement(100)
+
+    assert statement.customer.id == 100
+    assert statement.customer.name == "ACME"
+
+    # 2 factures + 2 paiements du client 100 (le paiement de AUTRE est exclu).
+    assert len(statement.entries) == 4
+    types_dates = [(e.type, e.date) for e in statement.entries]
+    # Triées par date croissante (facture avant paiement à date égale).
+    assert types_dates == [
+        ("facture", date(2026, 1, 10)),
+        ("paiement", date(2026, 1, 20)),
+        ("facture", date(2026, 3, 1)),
+        ("paiement", date(2026, 3, 15)),
+    ]
+
+    # Solde courant : +1000, -1000, +500, -300 -> 0, 0, 500, 200.
+    balances = [e.balance for e in statement.entries]
+    assert balances == [
+        Decimal("1000.00"), Decimal("0.00"),
+        Decimal("500.00"), Decimal("200.00"),
+    ]
+    assert statement.final_balance == Decimal("200.00")
+
+
+def test_build_statement_empty_for_unknown_customer(storage):
+    svc = LedgerService(FakePennylane([], all_invoices=[]), storage)
+    statement = svc.build_statement(12345)
+    assert statement.entries == []
+    assert statement.final_balance == Decimal("0")

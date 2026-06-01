@@ -3,6 +3,8 @@
 Tous les modules importent depuis ici. Ne JAMAIS ajouter de logique réseau/DB.
 Les helpers purs (bucket_for, level_for) sont dans core/aging.py.
 """
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
@@ -74,6 +76,8 @@ class PaymentMatch:
     confidence: MatchConfidence
     matched_invoice_numbers: list[str] = field(default_factory=list)
     reason: str = ""
+    # Date de l'opération bancaire (sert au tri dans le relevé de compte client).
+    date: date | None = None
 
 
 @dataclass
@@ -97,3 +101,27 @@ class CustomerDunningRow:
     suggested_level: ReminderLevel
     last_reminder: ReminderLogEntry | None
     blocked_by_payment: bool
+
+
+@dataclass
+class StatementEntry:
+    """Une écriture du relevé de compte client : une facture (débit) ou un
+    paiement rapproché (crédit), avec le solde courant cumulé après l'écriture.
+    """
+    date: date
+    type: str            # "facture" | "paiement"
+    label: str
+    number: str | None
+    debit: Decimal | None
+    credit: Decimal | None
+    balance: Decimal
+
+
+@dataclass
+class CustomerStatement:
+    """Relevé de compte complet d'un client : écritures triées par date
+    croissante (factures payées et impayées + paiements) et solde final.
+    """
+    customer: Customer
+    entries: list[StatementEntry]
+    final_balance: Decimal

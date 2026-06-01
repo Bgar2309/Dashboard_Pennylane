@@ -12,9 +12,10 @@ from fastapi.testclient import TestClient
 
 from api import deps
 from api.main import app
-from core.models import (AgingBucket, Customer, CustomerDunningRow, Invoice,
-                         MatchConfidence, PaymentMatch, ReminderLevel,
-                         ReminderLogEntry)
+from core.models import (AgingBucket, Customer, CustomerDunningRow,
+                         CustomerStatement, Invoice, MatchConfidence,
+                         PaymentMatch, ReminderLevel, ReminderLogEntry,
+                         StatementEntry)
 
 TODAY = date(2026, 6, 1)
 
@@ -54,6 +55,30 @@ class FakeLedger:
 
     def get_open_invoices(self, use_cache=True, max_cache_age_s=1800):
         return [_invoice(), _invoice(id=2, customer_id=99, number="260900")]
+
+    def build_statement(self, customer_id):
+        if customer_id == 404:
+            return CustomerStatement(
+                customer=Customer(id=customer_id, name=""),
+                entries=[], final_balance=Decimal("0"),
+            )
+        return CustomerStatement(
+            customer=Customer(id=customer_id, name="GALLIN", email=None),
+            entries=[
+                StatementEntry(
+                    date=date(2026, 3, 1), type="facture", label="Facture 260604",
+                    number="260604", debit=Decimal("1200.00"), credit=None,
+                    balance=Decimal("1200.00"),
+                ),
+                StatementEntry(
+                    date=date(2026, 3, 20), type="paiement",
+                    label="Règlement facture 260604", number="260604",
+                    debit=None, credit=Decimal("1000.00"),
+                    balance=Decimal("200.00"),
+                ),
+            ],
+            final_balance=Decimal("200.00"),
+        )
 
 
 class FakeReminders:
@@ -184,6 +209,23 @@ def test_get_customer_invoices(client):
 
 def test_get_customer_invoices_404(client):
     resp = client.get("/api/ledger/12345")
+    assert resp.status_code == 404
+
+
+def test_get_customer_statement(client):
+    resp = client.get("/api/ledger/10/statement")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["customer"]["id"] == 10
+    assert body["final_balance"] == "200.00"
+    assert len(body["entries"]) == 2
+    assert body["entries"][0]["type"] == "facture"
+    assert body["entries"][1]["type"] == "paiement"
+    assert body["entries"][1]["credit"] == "1000.00"
+
+
+def test_get_customer_statement_404(client):
+    resp = client.get("/api/ledger/404/statement")
     assert resp.status_code == 404
 
 

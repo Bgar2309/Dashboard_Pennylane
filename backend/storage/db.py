@@ -57,7 +57,8 @@ class Storage:
                 confidence              TEXT    NOT NULL,
                 matched_invoice_numbers TEXT    NOT NULL,
                 reason                  TEXT    NOT NULL DEFAULT '',
-                created_at              TEXT    NOT NULL
+                created_at              TEXT    NOT NULL,
+                paid_at                 TEXT
             );
 
             CREATE TABLE IF NOT EXISTS invoice_cache (
@@ -82,6 +83,13 @@ class Storage:
                 ON reminders_log (customer_id, id);
             """
         )
+        # Migration : colonne paid_at (date du paiement) ajoutée après coup pour
+        # les bases existantes. SQLite n'a pas de ADD COLUMN IF NOT EXISTS.
+        cols = {row["name"]
+                for row in self._conn.execute("PRAGMA table_info(payment_matches)")}
+        if "paid_at" not in cols:
+            self._conn.execute(
+                "ALTER TABLE payment_matches ADD COLUMN paid_at TEXT")
         self._conn.commit()
 
     # --- Historique relances (écrit UNIQUEMENT via log_reminder, sur confirmation) ---
@@ -139,11 +147,12 @@ class Storage:
         self._conn.executemany(
             """INSERT INTO payment_matches
                (bank_ref, invoice_id, invoice_number, customer_name, amount,
-                confidence, matched_invoice_numbers, reason, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                confidence, matched_invoice_numbers, reason, created_at, paid_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [(m.bank_ref, m.invoice_id, m.invoice_number, m.customer_name,
               str(m.amount), m.confidence.value,
-              json.dumps(m.matched_invoice_numbers), m.reason, created_at)
+              json.dumps(m.matched_invoice_numbers), m.reason, created_at,
+              m.date.isoformat() if m.date is not None else None)
              for m in matches],
         )
         self._conn.commit()
@@ -225,6 +234,7 @@ class Storage:
 
     @staticmethod
     def _row_to_match(row: sqlite3.Row) -> PaymentMatch:
+        paid_at = row["paid_at"]
         return PaymentMatch(
             bank_ref=row["bank_ref"],
             invoice_id=row["invoice_id"],
@@ -234,6 +244,7 @@ class Storage:
             confidence=MatchConfidence(row["confidence"]),
             matched_invoice_numbers=json.loads(row["matched_invoice_numbers"]),
             reason=row["reason"],
+            date=date.fromisoformat(paid_at) if paid_at else None,
         )
 
     @staticmethod

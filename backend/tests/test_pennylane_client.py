@@ -225,7 +225,8 @@ def test_open_invoice_partial_and_null_customer(client):
     assert inv.remaining_amount == Decimal("400.0")
     assert inv.amount == Decimal("1000.0")
     assert inv.customer_id == 0      # customer null
-    assert inv.customer_name == ""
+    # Pas de label exploitable -> rangée sous « Client inconnu », jamais perdue.
+    assert inv.customer_name == "Client inconnu"
     assert inv.due_date == date(2026, 3, 10)
 
 
@@ -233,6 +234,73 @@ def test_get_invoice_single(client):
     inv = client.get_invoice(4641597078)
     assert inv.number == "260153"
     assert inv.customer_name == "SIGNAL ET DECO"
+
+
+# --------------------------------------------------------------------------- #
+# Résolution du nom client : index /customers, fallback label, Client inconnu
+# --------------------------------------------------------------------------- #
+def _client_serving(customers_pages: dict, invoices_pages: dict) -> PennylaneClient:
+    """Construit un PennylaneClient mocké servant les pages fournies."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        path = request.url.path
+        if path.endswith("/customers"):
+            return _page_for(customers_pages, request)
+        if path.endswith("/customer_invoices"):
+            return _page_for(invoices_pages, request)
+        return httpx.Response(404, json={"error": f"unhandled {path}"})
+
+    http = httpx.Client(base_url=BASE_URL, transport=httpx.MockTransport(handler))
+    return PennylaneClient(token="t", base_url=BASE_URL, client=http)
+
+
+def test_null_customer_resolved_from_label():
+    """Une facture à customer: null est rattachée via son label, jamais perdue."""
+    customers = {None: {"items": [], "has_more": False, "next_cursor": None}}
+    invoices = {None: {"items": [
+        {"id": 700, "invoice_number": "260153",
+         "label": "Facture BC SIGNAL ET DECO - 260153",
+         "currency": "EUR", "amount": "1875.6",
+         "remaining_amount_with_tax": "1875.6",
+         "paid": False, "draft": False,
+         "date": "2026-01-20", "deadline": "2026-03-02",
+         "customer": None},
+    ], "has_more": False, "next_cursor": None}}
+    c = _client_serving(customers, invoices)
+    try:
+        (inv,) = c.list_open_invoices()
+    finally:
+        c.close()
+    # Nom extrait du libellé (entre « Facture » et « - <numero> »).
+    assert inv.customer_name == "BC SIGNAL ET DECO"
+    assert inv.id == 700
+    assert inv.remaining_amount == Decimal("1875.6")
+
+
+def test_archived_unpaid_invoice_is_included():
+    """Une facture status: 'archived' impayée (remaining>0) est bien incluse."""
+    customers = {None: {"items": [
+        {"id": 500, "name": "VIEUX CLIENT", "emails": []},
+    ], "has_more": False, "next_cursor": None}}
+    invoices = {None: {"items": [
+        {"id": 800, "invoice_number": "250042",
+         "label": "Facture VIEUX CLIENT - 250042",
+         "status": "archived", "currency": "EUR", "amount": "3200.0",
+         "remaining_amount_with_tax": "3200.0",
+         "paid": False, "draft": False,
+         "date": "2025-03-01", "deadline": "2025-04-01",
+         "customer": {"id": 500}},
+    ], "has_more": False, "next_cursor": None}}
+    c = _client_serving(customers, invoices)
+    try:
+        invs = c.list_open_invoices()
+    finally:
+        c.close()
+    ids = {i.id for i in invs}
+    assert 800 in ids  # archivée mais impayée -> incluse
+    arch = next(i for i in invs if i.id == 800)
+    assert arch.customer_name == "VIEUX CLIENT"
+    assert arch.remaining_amount == Decimal("3200.0")
 
 
 def test_since_filter_sent_as_json(client, calls):
