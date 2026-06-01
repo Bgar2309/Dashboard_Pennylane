@@ -13,8 +13,12 @@ COMPTABLES sur les comptes auxiliaires 411XXX (saisies par la comptable, reprise
 SAP comprise). ``list_open_invoices`` lit donc le grand livre :
 - ``/ledger_accounts`` : comptes auxiliaires clients (``type == "customer"``,
   ``number`` commençant par "411").
-- ``/ledger_entry_lines`` : lignes d'écriture de ces comptes ; une ligne est
-  OUVERTE (non soldée) SSI ``lettered_ledger_entry_lines.ids`` est vide.
+- ``/ledger_entry_lines`` : TOUTES les lignes d'écriture de ces comptes sur une
+  fenêtre glissante (depuis le 1er janvier de l'année N-offset). L'encours ne
+  dépend PLUS du lettrage (la comptable ne lettre pas au fil de l'eau les gros
+  comptes anciens) : on rapproche débit/crédit nous-mêmes, en FIFO par compte.
+  La fenêtre inclut déjà les reports « A-Nouveau » (posés au 1er janvier, débit
+  ET crédit), donc le solde d'ouverture : inutile de remonter avant.
 
 Noms de champs vérifiés sur l'API v2 :
 - ledger_accounts : id, number, label, type, enabled, letterable.
@@ -67,6 +71,15 @@ _CUSTOMER_ACCOUNT_PREFIX = "411"
 _GENERIC_CUSTOMER_ACCOUNTS = {"411", "41102", "4111", "4117", "41106"}
 # Délai d'échéance par défaut, conditions "30_days" (on n'appelle pas /customers).
 _DEFAULT_PAYMENT_TERM_DAYS = 30
+
+# Marqueur des reports à nouveau : Pennylane pose le solde d'ouverture de
+# l'exercice comme une écriture datée du 1er janvier dont le libellé contient
+# « A-Nouveau » (débit ET crédit). Ces lignes servent au calcul du solde et à
+# l'imputation FIFO mais ne sont pas des factures à relancer.
+_OPENING_BALANCE_MARKER = "a-nouveau"
+# En-deçà de ce solde net (débit − crédit), le compte est considéré soldé : on
+# ne génère aucune Invoice pour ce client. Tolère les centimes d'arrondi.
+SETTLED_THRESHOLD = Decimal("1.00")
 
 
 class PennylaneClient:
@@ -165,6 +178,34 @@ class PennylaneClient:
             return None
         return {"filter": json.dumps(
             [{"field": "date", "operator": "gteq", "value": since.isoformat()}])}
+
+    @staticmethod
+    def _receivable_window_start(today: date | None = None) -> date:
+        """Date de départ de la fenêtre de rapprochement débit/crédit.
+
+        1er janvier de (année courante − ``RECEIVABLE_WINDOW_START_YEAR_OFFSET``).
+        Cette fenêtre englobe déjà les reports « A-Nouveau » de l'exercice (posés
+        au 1er janvier), donc le solde d'ouverture : inutile de remonter avant.
+        """
+        ref = today or date.today()
+        return date(ref.year - config.RECEIVABLE_WINDOW_START_YEAR_OFFSET, 1, 1)
+
+    @staticmethod
+    def _is_opening_balance(label: Any) -> bool:
+        """Vrai si la ligne est un report à nouveau (libellé « A-Nouveau »)."""
+        return _OPENING_BALANCE_MARKER in str(label or "").lower()
+
+    @staticmethod
+    def _number_from_line_label(label: Any) -> str | None:
+        """Numéro de facture extrait du libellé d'une ligne d'écriture.
+
+        Les libellés se terminent souvent par « … – 240343 » (tiret cadratin ou
+        demi-cadratin, ou simple trait d'union). On rend la dernière séquence de
+        chiffres en fin de libellé, sinon ``None``.
+        """
+        text = str(label or "").strip()
+        match = re.search(r"(\d+)\s*$", text)
+        return match.group(1) if match else None
 
     # ------------------------------------------------------------------ #
     # Helpers de conversion JSON -> core
@@ -320,65 +361,148 @@ class PennylaneClient:
         return accounts
 
     def list_open_receivable_lines(self) -> list[dict[str, Any]]:
-        """Lignes d'écriture OUVERTES (non lettrées) de tous les comptes clients.
+        """TOUTES les lignes d'écriture des comptes clients sur la fenêtre.
 
         Pour CHAQUE compte client 411XXX, pagine ``/ledger_entry_lines`` filtré
-        sur ce compte et ne garde que les lignes non lettrées : une ligne est
-        ouverte SSI ``lettered_ledger_entry_lines.ids`` est vide. Une ligne
-        lettrée est soldée, donc exclue de l'encours.
+        sur ce compte ET sur ``date >= window_start`` (1er janvier de l'année
+        N-offset), trié par date croissante. On NE filtre PLUS sur le lettrage :
+        on récupère tout (débits ET crédits, reports « A-Nouveau » inclus), car
+        le rapprochement débit/crédit est fait nous-mêmes (FIFO) en aval. Les
+        gros comptes anciens ne sont pas lettrés au fil de l'eau : se fier au
+        lettrage faussait l'encours (crédits ignorés).
         """
         accounts = self.list_customer_ledger_accounts()
+        window_start = self._receivable_window_start()
         lines: list[dict[str, Any]] = []
         for account_id in accounts:
-            params = {"filter": json.dumps(
-                [{"field": "ledger_account_id", "operator": "eq",
-                  "value": account_id}])}
-            for raw in self._paginate("/ledger_entry_lines", params):
-                lettered = raw.get("lettered_ledger_entry_lines") or {}
-                if lettered.get("ids"):
-                    continue  # ligne lettrée -> soldée -> hors encours.
-                lines.append(raw)
+            params = {
+                "filter": json.dumps([
+                    {"field": "ledger_account_id", "operator": "eq",
+                     "value": account_id},
+                    {"field": "date", "operator": "gteq",
+                     "value": window_start.isoformat()},
+                ]),
+                "sort": "date",  # plus ancienne d'abord (ordre FIFO).
+            }
+            lines.extend(self._paginate("/ledger_entry_lines", params))
         return lines
 
     def list_open_invoices(self) -> list[Invoice]:
-        """Encours client : une ``Invoice`` par ligne d'écriture débitrice ouverte.
+        """Encours client réel, par rapprochement débit/crédit FIFO par compte.
 
         Lit le poste client dans les écritures comptables (comptes 411XXX) et non
-        dans ``/customer_invoices``. Pour chaque ligne ouverte (non lettrée) :
-        montant = ``Decimal(debit) - Decimal(credit)``. On NE garde que les
-        lignes débitrices (montant > 0) : un crédit isolé non lettré (acompte /
-        avoir non rapproché) n'est pas une créance à relancer. L'agrégation par
-        client (compensation des crédits) est faite en aval par
-        ``LedgerService.build_dunning_rows``.
+        dans ``/customer_invoices``, et NE dépend plus du lettrage (la comptable
+        ne lettre pas au fil de l'eau les gros comptes anciens). Pour chaque
+        compte 411 :
+
+        - On sépare débits (factures + à-nouveau débiteurs) et crédits
+          (règlements + avoirs + à-nouveau créditeurs).
+        - ``solde_net = Σ debit − Σ credit``. Si ``solde_net <= SETTLED_THRESHOLD``
+          le compte est soldé : AUCUNE ``Invoice`` n'est émise (le client sort de
+          la liste à relancer).
+        - Sinon, le total des crédits est imputé sur les lignes débitrices de la
+          PLUS ANCIENNE à la plus récente (FIFO) : un règlement éteint d'abord
+          les vieilles créances. Chaque ligne débitrice restante (reliquat > 0)
+          devient une ``Invoice`` portant ce reliquat.
+
+        Les lignes « A-Nouveau » (reports à nouveau) servent au calcul du solde
+        et à l'imputation FIFO mais ne sont jamais des factures affichables ; un
+        reliquat porté par un à-nouveau est rattaché à une ``Invoice`` générique
+        « Solde antérieur » datée du début de fenêtre (aging/total préservés).
         """
         lines = self.list_open_receivable_lines()
         names = self._ledger_account_names
-        out: list[Invoice] = []
+        window_start = self._receivable_window_start()
+
+        # Regroupe les lignes par compte, en préservant l'ordre (déjà trié date
+        # croissante par l'API), pour un rapprochement FIFO compte par compte.
+        by_account: dict[int, list[dict[str, Any]]] = {}
         for raw in lines:
-            amount = self._decimal(raw.get("debit")) - self._decimal(raw.get("credit"))
-            if amount <= 0:
-                continue
             account = raw.get("ledger_account") or {}
             account_id = account.get("id") or 0
+            by_account.setdefault(account_id, []).append(raw)
+
+        out: list[Invoice] = []
+        for account_id, account_lines in by_account.items():
+            out.extend(self._match_account_fifo(
+                account_id, account_lines, names.get(account_id, ""),
+                window_start))
+        return out
+
+    def _match_account_fifo(self, account_id: int,
+                            lines: list[dict[str, Any]], customer_name: str,
+                            window_start: date) -> list[Invoice]:
+        """Rapprochement FIFO d'un compte 411 -> liste d'``Invoice`` à relancer.
+
+        Voir ``list_open_invoices``. Rend une liste vide si le compte est soldé
+        (``solde_net <= SETTLED_THRESHOLD``).
+        """
+        # Lignes débitrices (net > 0), de la plus ancienne à la plus récente
+        # (les lignes arrivent déjà triées date croissante), et total des crédits.
+        debit_lines: list[tuple[dict[str, Any], Decimal]] = []
+        total_credit = Decimal("0")
+        for raw in lines:
+            net = self._decimal(raw.get("debit")) - self._decimal(raw.get("credit"))
+            if net > 0:
+                debit_lines.append((raw, net))
+            elif net < 0:
+                total_credit += -net
+
+        total_debit = sum((amt for _, amt in debit_lines), Decimal("0"))
+        if total_debit - total_credit <= SETTLED_THRESHOLD:
+            return []  # compte soldé : rien à relancer.
+
+        out: list[Invoice] = []
+        carried_forward = Decimal("0")  # reliquats portés par des à-nouveau.
+        remaining_credit = total_credit
+        for raw, debit_amount in debit_lines:
+            # Imputation FIFO : le crédit éteint d'abord les plus vieilles lignes.
+            applied = min(remaining_credit, debit_amount)
+            remaining_credit -= applied
+            reliquat = debit_amount - applied
+            if reliquat <= 0:
+                continue  # ligne entièrement couverte -> disparaît.
+
+            if self._is_opening_balance(raw.get("label")):
+                # Un à-nouveau n'est pas une facture affichable : on cumule son
+                # reliquat dans la ligne générique « Solde antérieur ».
+                carried_forward += reliquat
+                continue
+
             entry = raw.get("ledger_entry") or {}
             line_date = self._date(raw.get("date"))
-            # Le n° de pièce n'est pas toujours présent : on prend le libellé
-            # nettoyé, sinon l'id de l'écriture (jamais inventé).
-            number = self._clean_label(raw.get("label")) or str(
-                entry.get("id") or raw["id"])
+            # Numéro : extrait du libellé si présent, sinon id de l'écriture.
+            number = (self._number_from_line_label(raw.get("label"))
+                      or str(entry.get("id") or raw["id"]))
             due_date = (line_date + timedelta(days=_DEFAULT_PAYMENT_TERM_DAYS)
                         if line_date else None)
             out.append(Invoice(
                 id=raw["id"],
                 number=number,
                 customer_id=account_id,
-                customer_name=names.get(account_id, ""),
+                customer_name=customer_name,
                 date=line_date or date.min,
                 due_date=due_date,
-                amount=amount,
+                amount=debit_amount,
                 currency="EUR",
                 paid=False,
-                remaining_amount=amount,
+                remaining_amount=reliquat,
+            ))
+
+        if carried_forward > 0:
+            # Reliquat antérieur non rattaché à une facture (porté par un report
+            # à nouveau) : on le matérialise pour ne pas le perdre (aging/total).
+            out.append(Invoice(
+                id=account_id,
+                number="Solde antérieur",
+                customer_id=account_id,
+                customer_name=customer_name,
+                date=window_start,
+                due_date=window_start + timedelta(days=_DEFAULT_PAYMENT_TERM_DAYS),
+                amount=carried_forward,
+                currency="EUR",
+                paid=False,
+                remaining_amount=carried_forward,
             ))
         return out
 

@@ -61,6 +61,25 @@ export interface CustomerDunningRow {
   blocked_by_payment: boolean;
 }
 
+/** `StatementEntryOut` — une écriture du relevé client (facture au débit,
+ * paiement au crédit) avec le solde courant cumulé. */
+export interface StatementEntry {
+  date: IsoDate;
+  type: string;
+  label: string;
+  number: string | null;
+  debit: Decimal | null;
+  credit: Decimal | null;
+  balance: Decimal;
+}
+
+/** `CustomerStatementOut` — relevé de compte complet d'un client. */
+export interface CustomerStatement {
+  customer: Customer;
+  entries: StatementEntry[];
+  final_balance: Decimal;
+}
+
 /** `PaymentMatchOut` — rapprochement transaction bancaire ↔ facture. */
 export interface PaymentMatch {
   bank_ref: string;

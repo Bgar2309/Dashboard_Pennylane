@@ -102,6 +102,10 @@ LEDGER_ACCOUNTS_PAGES = {
         "items": [
             {"id": 1002, "number": "411BRAD", "label": "Brady Groupe",
              "type": "customer", "enabled": True, "letterable": True},
+            {"id": 1003, "number": "411MYS", "label": "PROZON",
+             "type": "customer", "enabled": True, "letterable": True},
+            {"id": 1004, "number": "411OLDC", "label": "OLDCO",
+             "type": "customer", "enabled": True, "letterable": True},
             {"id": 9999, "number": "4111", "label": "Clients",
              "type": "customer", "enabled": True, "letterable": True},
             {"id": 8888, "number": "41106001", "label": "Clients e-commerce",
@@ -118,35 +122,74 @@ LEDGER_ACCOUNTS_PAGES = {
 }
 
 # Lignes d'écriture (/ledger_entry_lines), indexées par compte client.
-# lettered_ledger_entry_lines.ids vide == ligne ouverte ; rempli == soldée.
+# Le lettrage est désormais IGNORÉ : on prend tout (débits ET crédits, reports
+# « A-Nouveau » inclus) et on rapproche débit/crédit nous-mêmes en FIFO.
 LEDGER_LINES_BY_ACCOUNT = {
+    # 1001 SIGNAL ET DECO : partiellement payé. Le règlement (1300) éteint en
+    # FIFO la plus vieille facture (5001) puis laisse 1575,6 de reliquat sur 5002.
     1001: [
-        {  # ouverte, débitrice -> devient une Invoice (SIGNAL ET DECO)
-            "id": 5001, "label": "FAC 260153", "debit": "1875.6", "credit": "0.0",
-            "date": "2026-01-20",
-            "ledger_account": {"id": 1001, "number": "411SIGN"},
-            "ledger_entry": {"id": 70001},
-            "lettered_ledger_entry_lines": {"ids": [], "url": None}},
-        {  # lettrée (ids remplis) -> soldée -> exclue
-            "id": 5002, "label": "FAC 260100", "debit": "500.0", "credit": "0.0",
-            "date": "2026-01-01",
-            "ledger_account": {"id": 1001, "number": "411SIGN"},
-            "ledger_entry": {"id": 70000},
-            "lettered_ledger_entry_lines": {"ids": [123, 124], "url": f"{BASE_URL}/x"}},
+        {"id": 5001, "label": "FAC SIGNAL – 260153", "debit": "1000.0",
+         "credit": "0.0", "date": "2026-01-20",
+         "ledger_account": {"id": 1001, "number": "411SIGN"},
+         "ledger_entry": {"id": 70001},
+         "lettered_ledger_entry_lines": {"ids": [], "url": None}},
+        {  # libellé sans n° -> number = id de l'écriture ; « lettrée » mais ignoré.
+         "id": 5002, "label": "FAC SIGNAL", "debit": "1875.6",
+         "credit": "0.0", "date": "2026-02-10",
+         "ledger_account": {"id": 1001, "number": "411SIGN"},
+         "ledger_entry": {"id": 70002},
+         "lettered_ledger_entry_lines": {"ids": [123], "url": f"{BASE_URL}/x"}},
+        {"id": 5003, "label": "Virement SIGNAL", "debit": "0.0",
+         "credit": "1300.0", "date": "2026-03-01",
+         "ledger_account": {"id": 1001, "number": "411SIGN"},
+         "ledger_entry": {"id": 70003},
+         "lettered_ledger_entry_lines": {"ids": [], "url": None}},
     ],
+    # 1002 Brady Groupe : soldé (le crédit couvre le débit) -> AUCUNE Invoice.
     1002: [
-        {  # ouverte mais au crédit (montant <= 0) -> acompte/avoir -> ignorée
-            "id": 5003, "label": "Acompte", "debit": "0.0", "credit": "300.0",
-            "date": "2026-02-05",
-            "ledger_account": {"id": 1002, "number": "411BRAD"},
-            "ledger_entry": {"id": 70002},
-            "lettered_ledger_entry_lines": {"ids": [], "url": None}},
-        {  # ouverte, débitrice, sans libellé -> number = id de l'écriture
-            "id": 5004, "label": "", "debit": "1000.0", "credit": "0.0",
-            "date": "2026-02-10",
-            "ledger_account": {"id": 1002, "number": "411BRAD"},
-            "ledger_entry": {"id": 70003},
-            "lettered_ledger_entry_lines": {"ids": [], "url": None}},
+        {"id": 5004, "label": "FAC BRADY – 260102", "debit": "1000.0",
+         "credit": "0.0", "date": "2026-02-10",
+         "ledger_account": {"id": 1002, "number": "411BRAD"},
+         "ledger_entry": {"id": 70004},
+         "lettered_ledger_entry_lines": {"ids": [], "url": None}},
+        {"id": 5005, "label": "Règlement BRADY", "debit": "0.0",
+         "credit": "1000.0", "date": "2026-02-20",
+         "ledger_account": {"id": 1002, "number": "411BRAD"},
+         "ledger_entry": {"id": 70005},
+         "lettered_ledger_entry_lines": {"ids": [], "url": None}},
+    ],
+    # 1003 PROZON : gros report à nouveau payé mais NON lettré. Le crédit éteint
+    # l'à-nouveau -> solde net ~0 -> le client disparaît (bug PROZON corrigé).
+    1003: [
+        {"id": 5006, "label": "A-Nouveau", "debit": "2100000.0",
+         "credit": "0.0", "date": "2026-01-01",
+         "ledger_account": {"id": 1003, "number": "411MYS"},
+         "ledger_entry": {"id": 70006},
+         "lettered_ledger_entry_lines": {"ids": [], "url": None}},
+        {"id": 5007, "label": "Virement PROZON", "debit": "0.0",
+         "credit": "2100000.0", "date": "2026-03-15",
+         "ledger_account": {"id": 1003, "number": "411MYS"},
+         "ledger_entry": {"id": 70007},
+         "lettered_ledger_entry_lines": {"ids": [], "url": None}},
+    ],
+    # 1004 OLDCO : à-nouveau partiellement payé (reliquat reporté en « Solde
+    # antérieur ») + une facture réelle restant due.
+    1004: [
+        {"id": 5008, "label": "A-Nouveau report", "debit": "5000.0",
+         "credit": "0.0", "date": "2026-01-01",
+         "ledger_account": {"id": 1004, "number": "411OLDC"},
+         "ledger_entry": {"id": 70008},
+         "lettered_ledger_entry_lines": {"ids": [], "url": None}},
+        {"id": 5009, "label": "FAC OLDCO – 260500", "debit": "800.0",
+         "credit": "0.0", "date": "2026-02-01",
+         "ledger_account": {"id": 1004, "number": "411OLDC"},
+         "ledger_entry": {"id": 70009},
+         "lettered_ledger_entry_lines": {"ids": [], "url": None}},
+        {"id": 5010, "label": "Acompte OLDCO", "debit": "0.0",
+         "credit": "4500.0", "date": "2026-02-15",
+         "ledger_account": {"id": 1004, "number": "411OLDC"},
+         "ledger_entry": {"id": 70010},
+         "lettered_ledger_entry_lines": {"ids": [], "url": None}},
     ],
 }
 
@@ -321,7 +364,8 @@ def test_get_invoice_single(client):
 def test_list_customer_ledger_accounts_excludes_generic_and_reserved(client):
     """Seuls les comptes ``customer`` non génériques et actifs sont retenus."""
     accounts = client.list_customer_ledger_accounts()
-    assert accounts == {1001: "SIGNAL ET DECO", 1002: "Brady Groupe"}
+    assert accounts == {1001: "SIGNAL ET DECO", 1002: "Brady Groupe",
+                        1003: "PROZON", 1004: "OLDCO"}
     # Le générique 4111 (« Clients ») et le reserved 41106001 sont écartés.
     assert 9999 not in accounts and 8888 not in accounts
     # Le générique 41106 (« Clients - Numéros standards ») est écarté.
@@ -339,49 +383,77 @@ def test_list_customer_ledger_accounts_filter_and_sort(client, calls):
         {"field": "number", "operator": "start_with", "value": "411"}]
 
 
-def test_list_open_receivable_lines_excludes_lettered(client):
-    """Une ligne lettrée (ids non vides) est exclue ; les ouvertes sont gardées."""
+def _expected_window_start() -> date:
+    return date(date.today().year - config.RECEIVABLE_WINDOW_START_YEAR_OFFSET, 1, 1)
+
+
+def test_list_open_receivable_lines_keeps_all_lines(client):
+    """On ne filtre PLUS sur le lettrage : tout est gardé (débits ET crédits)."""
     lines = client.list_open_receivable_lines()
     ids = {l["id"] for l in lines}
-    # 5002 est lettrée -> exclue. 5001, 5003 (crédit), 5004 sont ouvertes.
-    assert ids == {5001, 5003, 5004}
-    assert 5002 not in ids
+    # 5002 est « lettrée » dans Pennylane mais reste incluse ; les crédits aussi.
+    assert {5001, 5002, 5003, 5004, 5005, 5006, 5007} <= ids
 
 
-def test_list_open_invoices_from_open_ledger_lines(client):
-    """Chaque ligne ouverte débitrice devient une Invoice avec le bon nom."""
+def test_open_receivable_lines_filter_window_and_sort(client, calls):
+    """Filtre = ledger_account_id eq + date gteq window_start ; tri date croissant."""
+    client.list_open_receivable_lines()
+    call = next(r for r in calls if r.url.path.endswith("/ledger_entry_lines"))
+    query = parse_qs(call.url.query.decode())
+    assert query["sort"] == ["date"]
+    flt = {c["field"]: c for c in json.loads(query["filter"][0])}
+    assert flt["ledger_account_id"]["operator"] == "eq"
+    assert flt["date"]["operator"] == "gteq"
+    assert flt["date"]["value"] == _expected_window_start().isoformat()
+
+
+def test_list_open_invoices_fifo_partial_payment(client):
+    """Le règlement éteint en FIFO la plus vieille facture, laisse un reliquat."""
     invoices = client.list_open_invoices()
     by_id = {i.id: i for i in invoices}
-    # 5003 est un crédit (acompte non lettré) -> ignoré ; 5002 lettrée -> exclu.
-    assert set(by_id) == {5001, 5004}
-
-    sig = by_id[5001]
-    assert isinstance(sig, Invoice)
-    assert sig.customer_id == 1001
-    assert sig.customer_name == "SIGNAL ET DECO"
-    assert sig.number == "FAC 260153"
-    assert sig.amount == Decimal("1875.6")
-    assert sig.remaining_amount == Decimal("1875.6")
-    assert sig.currency == "EUR"
-    assert sig.paid is False
-    assert sig.date == date(2026, 1, 20)
-    # due_date = date + 30 jours (conditions "30_days" par défaut).
-    assert sig.due_date == date(2026, 1, 20) + timedelta(days=30)
-
-
-def test_open_invoice_number_falls_back_to_entry_id(client):
-    """Sans libellé exploitable, le numéro = id de l'écriture (jamais inventé)."""
-    inv = next(i for i in client.list_open_invoices() if i.id == 5004)
-    assert inv.number == "70003"  # ledger_entry.id
-    assert inv.customer_name == "Brady Groupe"
-    assert inv.amount == Decimal("1000.0")
+    # 1001 : règlement 1300 -> 5001 (1000) éteinte (disparaît), reliquat 1575,6
+    # sur 5002.
+    assert 5001 not in by_id
+    inv = by_id[5002]
+    assert isinstance(inv, Invoice)
+    assert inv.customer_id == 1001
+    assert inv.customer_name == "SIGNAL ET DECO"
+    assert inv.amount == Decimal("1875.6")           # montant débit d'origine
+    assert inv.remaining_amount == Decimal("1575.6")  # reliquat après FIFO
+    assert inv.number == "70002"  # libellé sans n° -> id de l'écriture
+    assert inv.currency == "EUR"
+    assert inv.paid is False
+    assert inv.date == date(2026, 2, 10)
     assert inv.due_date == date(2026, 2, 10) + timedelta(days=30)
 
 
-def test_open_invoices_ignore_unlettered_credit(client):
-    """Un crédit ouvert isolé (montant <= 0) n'est pas une créance à relancer."""
-    ids = {i.id for i in client.list_open_invoices()}
-    assert 5003 not in ids
+def test_settled_account_produces_no_invoice(client):
+    """Un compte dont les crédits couvrent les débits ne produit AUCUNE Invoice."""
+    customer_ids = {i.customer_id for i in client.list_open_invoices()}
+    # 1002 (Brady) soldé et 1003 (PROZON, à-nouveau payé) soldé -> absents.
+    assert 1002 not in customer_ids
+    assert 1003 not in customer_ids
+
+
+def test_opening_balance_not_displayable_and_carry_forward(client):
+    """Les lignes « A-Nouveau » ne sont pas des factures affichables ; leur
+    reliquat est porté par une Invoice générique « Solde antérieur »."""
+    invoices = [i for i in client.list_open_invoices() if i.customer_id == 1004]
+    ids = {i.id for i in invoices}
+    # La ligne A-Nouveau (5008) n'est jamais une facture affichable.
+    assert 5008 not in ids
+
+    # La facture réelle 5009 reste due, n° extrait du libellé.
+    fac = next(i for i in invoices if i.id == 5009)
+    assert fac.number == "260500"
+    assert fac.amount == Decimal("800.0")
+    assert fac.remaining_amount == Decimal("800.0")
+
+    # Le reliquat de l'à-nouveau (500) est matérialisé en « Solde antérieur ».
+    solde = next(i for i in invoices if i.number == "Solde antérieur")
+    assert solde.amount == Decimal("500.0")
+    assert solde.remaining_amount == Decimal("500.0")
+    assert solde.date == _expected_window_start()
 
 
 def test_list_open_invoices_lines_filtered_by_account(client, calls):
@@ -395,7 +467,7 @@ def test_list_open_invoices_lines_filtered_by_account(client, calls):
             if cond["field"] == "ledger_account_id":
                 assert cond["operator"] == "eq"
                 accounts_queried.add(cond["value"])
-    assert accounts_queried == {1001, 1002}
+    assert accounts_queried == {1001, 1002, 1003, 1004}
 
 
 def test_since_filter_sent_as_json(client, calls):
