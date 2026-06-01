@@ -6,15 +6,17 @@ Aucun appel réseau réel : on injecte un ``httpx.Client`` monté sur un
 remaining_amount_with_tax, deadline, emails, amount signé...).
 """
 import json
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from urllib.parse import parse_qs
 
 import httpx
 import pytest
 
+import config
 from core.models import BankTransaction, Customer, Invoice
 from integration.pennylane import PennylaneClient
+from integration.pennylane import client as client_module
 
 BASE_URL = "https://app.pennylane.com/api/external/v2"
 
@@ -280,3 +282,58 @@ def test_no_write_methods_exist():
     public = [n for n in dir(PennylaneClient)
               if not n.startswith("_") and callable(getattr(PennylaneClient, n))]
     assert not [n for n in public if any(f in n.lower() for f in forbidden)]
+
+
+# --------------------------------------------------------------------------- #
+# Fenêtre temporelle : filtre date gteq ~90 jours par défaut
+# --------------------------------------------------------------------------- #
+def test_list_bank_transactions_default_lookback_window(client, calls, monkeypatch):
+    monkeypatch.setattr(config, "REMINDER_LOOKBACK_DAYS", 90)
+    client.list_bank_transactions()
+
+    tx_call = next(r for r in calls if r.url.path.endswith("/transactions"))
+    query = parse_qs(tx_call.url.query.decode())
+    # Pas de tri sur date (l'API ne trie que sur id).
+    assert "sort" not in query
+    flt = json.loads(query["filter"][0])
+    assert len(flt) == 1
+    assert flt[0]["field"] == "date"
+    assert flt[0]["operator"] == "gteq"
+
+    expected = date.today() - timedelta(days=90)
+    sent = date.fromisoformat(flt[0]["value"])
+    # ~90 jours : on tolère 1 jour d'écart (bascule de minuit).
+    assert abs((sent - expected).days) <= 1
+
+
+# --------------------------------------------------------------------------- #
+# Rate limit 429 : retry avec backoff puis succès
+# --------------------------------------------------------------------------- #
+def test_get_retries_on_429_then_succeeds(monkeypatch):
+    # On n'attend pas réellement entre les tentatives.
+    sleeps: list[float] = []
+    monkeypatch.setattr(client_module.time, "sleep", lambda d: sleeps.append(d))
+
+    responses = [
+        httpx.Response(429, headers={"Retry-After": "1"}, json={"error": "rate"}),
+        httpx.Response(429, json={"error": "rate"}),
+        httpx.Response(200, json={"items": [], "has_more": False}),
+    ]
+    attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        resp = responses[attempts["n"]]
+        attempts["n"] += 1
+        return resp
+
+    http = httpx.Client(base_url=BASE_URL, transport=httpx.MockTransport(handler))
+    c = PennylaneClient(token="t", base_url=BASE_URL, client=http)
+    try:
+        payload = c._get("/transactions")
+    finally:
+        c.close()
+
+    assert payload == {"items": [], "has_more": False}
+    assert attempts["n"] == 3  # deux 429 + un 200
+    # Retry-After respecté (1s), puis backoff 2 ** 1 = 2s.
+    assert sleeps == [1.0, 2.0]
