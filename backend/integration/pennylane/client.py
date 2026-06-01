@@ -5,8 +5,23 @@ Auth : header ``Authorization: Bearer <PENNYLANE_TOKEN>``.
 Pagination cursor : toutes les listes renvoient ``{"items": [...], "has_more": bool,
 "next_cursor": "..."}`` ; on passe ``?cursor=<next_cursor>`` tant que ``has_more`` est vrai.
 
-Noms de champs vérifiés sur l'API v2 (endpoints /customer_invoices, /customers,
-/transactions) :
+Source du poste client (créances)
+---------------------------------
+Le VRAI encours client ne vit pas dans ``/customer_invoices`` (qui ne voit qu'une
+poignée de factures, souvent à ``customer: null``) mais dans les ÉCRITURES
+COMPTABLES sur les comptes auxiliaires 411XXX (saisies par la comptable, reprise
+SAP comprise). ``list_open_invoices`` lit donc le grand livre :
+- ``/ledger_accounts`` : comptes auxiliaires clients (``type == "customer"``,
+  ``number`` commençant par "411").
+- ``/ledger_entry_lines`` : lignes d'écriture de ces comptes ; une ligne est
+  OUVERTE (non soldée) SSI ``lettered_ledger_entry_lines.ids`` est vide.
+
+Noms de champs vérifiés sur l'API v2 :
+- ledger_accounts : id, number, label, type, enabled, letterable.
+  (filtre ``start_with`` sur ``number`` ; tri accepté = ``id`` UNIQUEMENT).
+- ledger_entry_lines : id, label, debit (str), credit (str), date,
+  ledger_account {id, number}, ledger_entry {id},
+  lettered_ledger_entry_lines {ids: [...], url}.
 - customer_invoices : id, invoice_number, label, amount, remaining_amount_with_tax,
   currency, paid, draft, date, deadline, customer ({id, url} ou null).
 - customers : id, name, emails (liste).
@@ -37,6 +52,13 @@ _MAX_RETRIES = 5
 # Pause entre deux pages pour ménager le rate limit (secondes).
 _PAGE_PAUSE = 0.2
 
+# Comptes auxiliaires clients : préfixe de numéro (411XXX).
+_CUSTOMER_ACCOUNT_PREFIX = "411"
+# Comptes génériques « Clients » sans tiers rattaché : à exclure de l'encours.
+_GENERIC_CUSTOMER_ACCOUNTS = {"411", "41102", "4111", "4117"}
+# Délai d'échéance par défaut, conditions "30_days" (on n'appelle pas /customers).
+_DEFAULT_PAYMENT_TERM_DAYS = 30
+
 
 class PennylaneClient:
     """Client HTTP en lecture seule pour l'API REST Pennylane v2.
@@ -64,6 +86,9 @@ class PennylaneClient:
         # Cache id client -> nom (les factures ne portent pas le nom du client,
         # seulement {id, url} -> on joint avec /customers).
         self._customer_names: dict[int, str] = {}
+        # Cache id compte auxiliaire 411XXX -> libellé du compte (= nom du tiers),
+        # alimenté par ``list_customer_ledger_accounts``.
+        self._ledger_account_names: dict[int, str] = {}
 
     # ------------------------------------------------------------------ #
     # Cycle de vie
@@ -149,6 +174,13 @@ class PennylaneClient:
         if not value:
             return None
         return date.fromisoformat(str(value)[:10])
+
+    @staticmethod
+    def _clean_label(label: Any) -> str:
+        """Libellé d'une ligne d'écriture, espaces de bord retirés (sinon "")."""
+        if not label:
+            return ""
+        return str(label).strip()
 
     def _map_customer(self, raw: dict[str, Any]) -> Customer:
         emails = raw.get("emails") or []
@@ -247,22 +279,95 @@ class PennylaneClient:
                 for raw in self._paginate("/customer_invoices",
                                           self._since_filter(since))]
 
-    def list_open_invoices(self) -> list[Invoice]:
-        """Factures clients non soldées (remaining_amount > 0). Pagine tout.
+    def list_customer_ledger_accounts(self) -> dict[int, str]:
+        """Comptes auxiliaires clients (411XXX) : ``{ledger_account_id: nom}``.
 
-        Critère unique : ``draft == false`` ET ``remaining_amount_with_tax > 0``.
-        On NE filtre PAS sur ``status`` : les impayées anciennes portent souvent
-        ``status: "archived"`` (ou ``late`` / ``upcoming``) et doivent être
-        incluses. Seuls les brouillons sont exclus (pas des créances réelles).
+        Source réelle du poste client. On filtre côté API sur ``number``
+        commençant par "411", puis on ne garde que les comptes
+        ``type == "customer"`` : on écarte les comptes ``reserved`` (41106xxx
+        e-commerce) et les comptes génériques au libellé « Clients »
+        (411, 41102, 4111, 4117) qui ne portent aucun tiers. Pagine tout.
+
+        Le résultat est mis en cache sur l'instance (``_ledger_account_names``)
+        pour servir de jointure id -> nom aux lignes d'écriture.
         """
-        names = self._customer_names_map()
-        out: list[Invoice] = []
-        for raw in self._paginate("/customer_invoices"):
-            if raw.get("draft"):
+        params = {
+            "filter": json.dumps([{"field": "number", "operator": "start_with",
+                                   "value": _CUSTOMER_ACCOUNT_PREFIX}]),
+            "sort": "id",  # le tri n'accepte que ``id`` (sinon 400).
+        }
+        accounts: dict[int, str] = {}
+        for raw in self._paginate("/ledger_accounts", params):
+            if raw.get("type") != "customer":
                 continue
-            inv = self._map_invoice(raw, names)
-            if inv.remaining_amount > 0:
-                out.append(inv)
+            number = str(raw.get("number") or "")
+            if number in _GENERIC_CUSTOMER_ACCOUNTS:
+                continue
+            accounts[raw["id"]] = raw.get("label") or number
+        self._ledger_account_names = accounts
+        return accounts
+
+    def list_open_receivable_lines(self) -> list[dict[str, Any]]:
+        """Lignes d'écriture OUVERTES (non lettrées) de tous les comptes clients.
+
+        Pour CHAQUE compte client 411XXX, pagine ``/ledger_entry_lines`` filtré
+        sur ce compte et ne garde que les lignes non lettrées : une ligne est
+        ouverte SSI ``lettered_ledger_entry_lines.ids`` est vide. Une ligne
+        lettrée est soldée, donc exclue de l'encours.
+        """
+        accounts = self.list_customer_ledger_accounts()
+        lines: list[dict[str, Any]] = []
+        for account_id in accounts:
+            params = {"filter": json.dumps(
+                [{"field": "ledger_account_id", "operator": "eq",
+                  "value": account_id}])}
+            for raw in self._paginate("/ledger_entry_lines", params):
+                lettered = raw.get("lettered_ledger_entry_lines") or {}
+                if lettered.get("ids"):
+                    continue  # ligne lettrée -> soldée -> hors encours.
+                lines.append(raw)
+        return lines
+
+    def list_open_invoices(self) -> list[Invoice]:
+        """Encours client : une ``Invoice`` par ligne d'écriture débitrice ouverte.
+
+        Lit le poste client dans les écritures comptables (comptes 411XXX) et non
+        dans ``/customer_invoices``. Pour chaque ligne ouverte (non lettrée) :
+        montant = ``Decimal(debit) - Decimal(credit)``. On NE garde que les
+        lignes débitrices (montant > 0) : un crédit isolé non lettré (acompte /
+        avoir non rapproché) n'est pas une créance à relancer. L'agrégation par
+        client (compensation des crédits) est faite en aval par
+        ``LedgerService.build_dunning_rows``.
+        """
+        lines = self.list_open_receivable_lines()
+        names = self._ledger_account_names
+        out: list[Invoice] = []
+        for raw in lines:
+            amount = self._decimal(raw.get("debit")) - self._decimal(raw.get("credit"))
+            if amount <= 0:
+                continue
+            account = raw.get("ledger_account") or {}
+            account_id = account.get("id") or 0
+            entry = raw.get("ledger_entry") or {}
+            line_date = self._date(raw.get("date"))
+            # Le n° de pièce n'est pas toujours présent : on prend le libellé
+            # nettoyé, sinon l'id de l'écriture (jamais inventé).
+            number = self._clean_label(raw.get("label")) or str(
+                entry.get("id") or raw["id"])
+            due_date = (line_date + timedelta(days=_DEFAULT_PAYMENT_TERM_DAYS)
+                        if line_date else None)
+            out.append(Invoice(
+                id=raw["id"],
+                number=number,
+                customer_id=account_id,
+                customer_name=names.get(account_id, ""),
+                date=line_date or date.min,
+                due_date=due_date,
+                amount=amount,
+                currency="EUR",
+                paid=False,
+                remaining_amount=amount,
+            ))
         return out
 
     def get_invoice(self, invoice_id: int) -> Invoice:

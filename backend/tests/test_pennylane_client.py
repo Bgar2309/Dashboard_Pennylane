@@ -87,6 +87,77 @@ INVOICES_PAGES = {
     },
 }
 
+# Comptes auxiliaires clients (/ledger_accounts) : on garde les ``customer``,
+# on écarte le générique « Clients » (4111) et le compte ``reserved`` e-commerce.
+LEDGER_ACCOUNTS_PAGES = {
+    None: {
+        "items": [
+            {"id": 1001, "number": "411SIGN", "label": "SIGNAL ET DECO",
+             "type": "customer", "enabled": True, "letterable": True},
+        ],
+        "has_more": True,
+        "next_cursor": "CUR_LA2",
+    },
+    "CUR_LA2": {
+        "items": [
+            {"id": 1002, "number": "411BRAD", "label": "Brady Groupe",
+             "type": "customer", "enabled": True, "letterable": True},
+            {"id": 9999, "number": "4111", "label": "Clients",
+             "type": "customer", "enabled": True, "letterable": True},
+            {"id": 8888, "number": "41106001", "label": "Clients e-commerce",
+             "type": "reserved", "enabled": True, "letterable": True},
+        ],
+        "has_more": False,
+        "next_cursor": None,
+    },
+}
+
+# Lignes d'écriture (/ledger_entry_lines), indexées par compte client.
+# lettered_ledger_entry_lines.ids vide == ligne ouverte ; rempli == soldée.
+LEDGER_LINES_BY_ACCOUNT = {
+    1001: [
+        {  # ouverte, débitrice -> devient une Invoice (SIGNAL ET DECO)
+            "id": 5001, "label": "FAC 260153", "debit": "1875.6", "credit": "0.0",
+            "date": "2026-01-20",
+            "ledger_account": {"id": 1001, "number": "411SIGN"},
+            "ledger_entry": {"id": 70001},
+            "lettered_ledger_entry_lines": {"ids": [], "url": None}},
+        {  # lettrée (ids remplis) -> soldée -> exclue
+            "id": 5002, "label": "FAC 260100", "debit": "500.0", "credit": "0.0",
+            "date": "2026-01-01",
+            "ledger_account": {"id": 1001, "number": "411SIGN"},
+            "ledger_entry": {"id": 70000},
+            "lettered_ledger_entry_lines": {"ids": [123, 124], "url": f"{BASE_URL}/x"}},
+    ],
+    1002: [
+        {  # ouverte mais au crédit (montant <= 0) -> acompte/avoir -> ignorée
+            "id": 5003, "label": "Acompte", "debit": "0.0", "credit": "300.0",
+            "date": "2026-02-05",
+            "ledger_account": {"id": 1002, "number": "411BRAD"},
+            "ledger_entry": {"id": 70002},
+            "lettered_ledger_entry_lines": {"ids": [], "url": None}},
+        {  # ouverte, débitrice, sans libellé -> number = id de l'écriture
+            "id": 5004, "label": "", "debit": "1000.0", "credit": "0.0",
+            "date": "2026-02-10",
+            "ledger_account": {"id": 1002, "number": "411BRAD"},
+            "ledger_entry": {"id": 70003},
+            "lettered_ledger_entry_lines": {"ids": [], "url": None}},
+    ],
+}
+
+
+def _ledger_lines_response(request: httpx.Request) -> httpx.Response:
+    """Sert les lignes du compte ciblé par le filtre ledger_account_id."""
+    flt = parse_qs(request.url.query.decode()).get("filter", ["[]"])[0]
+    account_id = None
+    for cond in json.loads(flt):
+        if cond.get("field") == "ledger_account_id":
+            account_id = cond.get("value")
+    items = LEDGER_LINES_BY_ACCOUNT.get(account_id, [])
+    return httpx.Response(200, json={"items": items, "has_more": False,
+                                     "next_cursor": None})
+
+
 TRANSACTIONS_PAGES = {
     None: {
         "items": [
@@ -122,6 +193,10 @@ def make_handler(calls: list[httpx.Request] | None = None):
             return _page_for(CUSTOMERS_PAGES, request)
         if path.endswith("/customer_invoices"):
             return _page_for(INVOICES_PAGES, request)
+        if path.endswith("/ledger_accounts"):
+            return _page_for(LEDGER_ACCOUNTS_PAGES, request)
+        if path.endswith("/ledger_entry_lines"):
+            return _ledger_lines_response(request)
         if path.endswith("/transactions"):
             return _page_for(TRANSACTIONS_PAGES, request)
         if "/customer_invoices/" in path:
@@ -211,25 +286,6 @@ def test_list_all_invoices_maps_fields(client):
     assert inv.due_date == date(2026, 3, 2)
 
 
-def test_list_open_invoices_filters_remaining_and_draft(client):
-    invoices = client.list_open_invoices()
-    ids = {i.id for i in invoices}
-    # 4641597078 (remaining>0) et 102 (partielle) -> oui
-    # 100 (soldée) et 101 (brouillon) -> non
-    assert ids == {4641597078, 102}
-    assert all(i.remaining_amount > 0 for i in invoices)
-
-
-def test_open_invoice_partial_and_null_customer(client):
-    inv = next(i for i in client.list_open_invoices() if i.id == 102)
-    assert inv.remaining_amount == Decimal("400.0")
-    assert inv.amount == Decimal("1000.0")
-    assert inv.customer_id == 0      # customer null
-    # Pas de label exploitable -> rangée sous « Client inconnu », jamais perdue.
-    assert inv.customer_name == "Client inconnu"
-    assert inv.due_date == date(2026, 3, 10)
-
-
 def test_get_invoice_single(client):
     inv = client.get_invoice(4641597078)
     assert inv.number == "260153"
@@ -237,70 +293,82 @@ def test_get_invoice_single(client):
 
 
 # --------------------------------------------------------------------------- #
-# Résolution du nom client : index /customers, fallback label, Client inconnu
+# Encours client via le grand livre : /ledger_accounts + /ledger_entry_lines
 # --------------------------------------------------------------------------- #
-def _client_serving(customers_pages: dict, invoices_pages: dict) -> PennylaneClient:
-    """Construit un PennylaneClient mocké servant les pages fournies."""
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.method == "GET"
-        path = request.url.path
-        if path.endswith("/customers"):
-            return _page_for(customers_pages, request)
-        if path.endswith("/customer_invoices"):
-            return _page_for(invoices_pages, request)
-        return httpx.Response(404, json={"error": f"unhandled {path}"})
-
-    http = httpx.Client(base_url=BASE_URL, transport=httpx.MockTransport(handler))
-    return PennylaneClient(token="t", base_url=BASE_URL, client=http)
+def test_list_customer_ledger_accounts_excludes_generic_and_reserved(client):
+    """Seuls les comptes ``customer`` non génériques sont retenus, paginés."""
+    accounts = client.list_customer_ledger_accounts()
+    assert accounts == {1001: "SIGNAL ET DECO", 1002: "Brady Groupe"}
+    # Le générique 4111 (« Clients ») et le reserved 41106001 sont écartés.
+    assert 9999 not in accounts and 8888 not in accounts
 
 
-def test_null_customer_resolved_from_label():
-    """Une facture à customer: null est rattachée via son label, jamais perdue."""
-    customers = {None: {"items": [], "has_more": False, "next_cursor": None}}
-    invoices = {None: {"items": [
-        {"id": 700, "invoice_number": "260153",
-         "label": "Facture BC SIGNAL ET DECO - 260153",
-         "currency": "EUR", "amount": "1875.6",
-         "remaining_amount_with_tax": "1875.6",
-         "paid": False, "draft": False,
-         "date": "2026-01-20", "deadline": "2026-03-02",
-         "customer": None},
-    ], "has_more": False, "next_cursor": None}}
-    c = _client_serving(customers, invoices)
-    try:
-        (inv,) = c.list_open_invoices()
-    finally:
-        c.close()
-    # Nom extrait du libellé (entre « Facture » et « - <numero> »).
-    assert inv.customer_name == "BC SIGNAL ET DECO"
-    assert inv.id == 700
-    assert inv.remaining_amount == Decimal("1875.6")
+def test_list_customer_ledger_accounts_filter_and_sort(client, calls):
+    client.list_customer_ledger_accounts()
+    call = next(r for r in calls if r.url.path.endswith("/ledger_accounts"))
+    query = parse_qs(call.url.query.decode())
+    assert query["sort"] == ["id"]  # seul tri accepté par l'API
+    assert json.loads(query["filter"][0]) == [
+        {"field": "number", "operator": "start_with", "value": "411"}]
 
 
-def test_archived_unpaid_invoice_is_included():
-    """Une facture status: 'archived' impayée (remaining>0) est bien incluse."""
-    customers = {None: {"items": [
-        {"id": 500, "name": "VIEUX CLIENT", "emails": []},
-    ], "has_more": False, "next_cursor": None}}
-    invoices = {None: {"items": [
-        {"id": 800, "invoice_number": "250042",
-         "label": "Facture VIEUX CLIENT - 250042",
-         "status": "archived", "currency": "EUR", "amount": "3200.0",
-         "remaining_amount_with_tax": "3200.0",
-         "paid": False, "draft": False,
-         "date": "2025-03-01", "deadline": "2025-04-01",
-         "customer": {"id": 500}},
-    ], "has_more": False, "next_cursor": None}}
-    c = _client_serving(customers, invoices)
-    try:
-        invs = c.list_open_invoices()
-    finally:
-        c.close()
-    ids = {i.id for i in invs}
-    assert 800 in ids  # archivée mais impayée -> incluse
-    arch = next(i for i in invs if i.id == 800)
-    assert arch.customer_name == "VIEUX CLIENT"
-    assert arch.remaining_amount == Decimal("3200.0")
+def test_list_open_receivable_lines_excludes_lettered(client):
+    """Une ligne lettrée (ids non vides) est exclue ; les ouvertes sont gardées."""
+    lines = client.list_open_receivable_lines()
+    ids = {l["id"] for l in lines}
+    # 5002 est lettrée -> exclue. 5001, 5003 (crédit), 5004 sont ouvertes.
+    assert ids == {5001, 5003, 5004}
+    assert 5002 not in ids
+
+
+def test_list_open_invoices_from_open_ledger_lines(client):
+    """Chaque ligne ouverte débitrice devient une Invoice avec le bon nom."""
+    invoices = client.list_open_invoices()
+    by_id = {i.id: i for i in invoices}
+    # 5003 est un crédit (acompte non lettré) -> ignoré ; 5002 lettrée -> exclu.
+    assert set(by_id) == {5001, 5004}
+
+    sig = by_id[5001]
+    assert isinstance(sig, Invoice)
+    assert sig.customer_id == 1001
+    assert sig.customer_name == "SIGNAL ET DECO"
+    assert sig.number == "FAC 260153"
+    assert sig.amount == Decimal("1875.6")
+    assert sig.remaining_amount == Decimal("1875.6")
+    assert sig.currency == "EUR"
+    assert sig.paid is False
+    assert sig.date == date(2026, 1, 20)
+    # due_date = date + 30 jours (conditions "30_days" par défaut).
+    assert sig.due_date == date(2026, 1, 20) + timedelta(days=30)
+
+
+def test_open_invoice_number_falls_back_to_entry_id(client):
+    """Sans libellé exploitable, le numéro = id de l'écriture (jamais inventé)."""
+    inv = next(i for i in client.list_open_invoices() if i.id == 5004)
+    assert inv.number == "70003"  # ledger_entry.id
+    assert inv.customer_name == "Brady Groupe"
+    assert inv.amount == Decimal("1000.0")
+    assert inv.due_date == date(2026, 2, 10) + timedelta(days=30)
+
+
+def test_open_invoices_ignore_unlettered_credit(client):
+    """Un crédit ouvert isolé (montant <= 0) n'est pas une créance à relancer."""
+    ids = {i.id for i in client.list_open_invoices()}
+    assert 5003 not in ids
+
+
+def test_list_open_invoices_lines_filtered_by_account(client, calls):
+    """Les lignes sont paginées par compte (filtre ledger_account_id eq)."""
+    client.list_open_invoices()
+    line_calls = [r for r in calls if r.url.path.endswith("/ledger_entry_lines")]
+    accounts_queried = set()
+    for r in line_calls:
+        flt = json.loads(parse_qs(r.url.query.decode())["filter"][0])
+        for cond in flt:
+            if cond["field"] == "ledger_account_id":
+                assert cond["operator"] == "eq"
+                accounts_queried.add(cond["value"])
+    assert accounts_queried == {1001, 1002}
 
 
 def test_since_filter_sent_as_json(client, calls):
