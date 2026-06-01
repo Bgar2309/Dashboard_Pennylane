@@ -19,7 +19,8 @@ Le filtre ``since`` utilise le format de filtre brut v2 :
 from __future__ import annotations
 
 import json
-from datetime import date
+import time
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterator
 
@@ -30,6 +31,10 @@ from core.models import BankTransaction, Customer, Invoice
 
 # Page maximale autorisée par l'API v2.
 _PAGE_LIMIT = 100
+# Nombre maximal de tentatives sur un GET (gestion du rate limit 429).
+_MAX_RETRIES = 5
+# Pause entre deux pages pour ménager le rate limit (secondes).
+_PAGE_PAUSE = 0.2
 
 
 class PennylaneClient:
@@ -76,7 +81,27 @@ class PennylaneClient:
     # Bas niveau : GET + pagination cursor (LECTURE SEULE)
     # ------------------------------------------------------------------ #
     def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        resp = self._client.get(path, params=params)
+        """GET avec retry/backoff exponentiel sur le rate limit 429.
+
+        Jusqu'à ``_MAX_RETRIES`` tentatives. Sur un 429, on respecte l'en-tête
+        ``Retry-After`` (en secondes) si présent, sinon on attend
+        ``2 ** tentative`` secondes. Après épuisement, l'erreur est levée
+        comme pour tout autre statut.
+        """
+        for attempt in range(_MAX_RETRIES):
+            resp = self._client.get(path, params=params)
+            if resp.status_code == 429 and attempt < _MAX_RETRIES - 1:
+                retry_after = resp.headers.get("Retry-After")
+                try:
+                    delay = (float(retry_after) if retry_after is not None
+                             else 2 ** attempt)
+                except (TypeError, ValueError):
+                    delay = 2 ** attempt
+                time.sleep(delay)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        # Épuisement des tentatives : on lève l'erreur du dernier 429.
         resp.raise_for_status()
         return resp.json()
 
@@ -95,6 +120,8 @@ class PennylaneClient:
             cursor = payload.get("next_cursor")
             if not cursor:
                 break
+            # Pause entre deux pages pour ménager le rate limit.
+            time.sleep(_PAGE_PAUSE)
             query = dict(query, cursor=cursor)
 
     @staticmethod
@@ -211,7 +238,14 @@ class PennylaneClient:
         return self._map_invoice(raw, names)
 
     def list_bank_transactions(self, since: date | None = None) -> list[BankTransaction]:
-        """Transactions des comptes liés à Pennylane (Revolut). source='revolut'."""
+        """Transactions des comptes liés à Pennylane (Revolut). source='revolut'.
+
+        Par défaut, ne récupère que les transactions des
+        ``config.REMINDER_LOOKBACK_DAYS`` derniers jours (90 par défaut), via le
+        filtre ``date gteq`` de l'API (le tri n'étant accepté que sur ``id``).
+        """
+        if since is None:
+            since = date.today() - timedelta(days=config.REMINDER_LOOKBACK_DAYS)
         return [self._map_transaction(raw)
                 for raw in self._paginate("/transactions", self._since_filter(since))]
 
