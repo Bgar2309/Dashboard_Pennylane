@@ -106,6 +106,11 @@ LEDGER_ACCOUNTS_PAGES = {
              "type": "customer", "enabled": True, "letterable": True},
             {"id": 8888, "number": "41106001", "label": "Clients e-commerce",
              "type": "reserved", "enabled": True, "letterable": True},
+            {"id": 7777, "number": "41106",
+             "label": "Clients - Numéros standards",
+             "type": "customer", "enabled": True, "letterable": True},
+            {"id": 6666, "number": "411OLD", "label": "Ancien client",
+             "type": "customer", "enabled": False, "letterable": True},
         ],
         "has_more": False,
         "next_cursor": None,
@@ -314,11 +319,15 @@ def test_get_invoice_single(client):
 # Encours client via le grand livre : /ledger_accounts + /ledger_entry_lines
 # --------------------------------------------------------------------------- #
 def test_list_customer_ledger_accounts_excludes_generic_and_reserved(client):
-    """Seuls les comptes ``customer`` non génériques sont retenus, paginés."""
+    """Seuls les comptes ``customer`` non génériques et actifs sont retenus."""
     accounts = client.list_customer_ledger_accounts()
     assert accounts == {1001: "SIGNAL ET DECO", 1002: "Brady Groupe"}
     # Le générique 4111 (« Clients ») et le reserved 41106001 sont écartés.
     assert 9999 not in accounts and 8888 not in accounts
+    # Le générique 41106 (« Clients - Numéros standards ») est écarté.
+    assert 7777 not in accounts
+    # Le compte désactivé (enabled == False) est écarté.
+    assert 6666 not in accounts
 
 
 def test_list_customer_ledger_accounts_filter_and_sort(client, calls):

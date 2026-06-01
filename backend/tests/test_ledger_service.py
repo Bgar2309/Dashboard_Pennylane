@@ -103,6 +103,29 @@ def test_get_open_invoices_bypasses_cache_when_disabled(storage):
     assert pny.calls == 2
 
 
+def test_get_open_invoices_refresh_forces_fresh_call(storage):
+    pny = FakePennylane(INVOICES)
+    svc = LedgerService(pny, storage)
+
+    svc.get_open_invoices()                 # remplit le cache (1 appel)
+    # Cache frais mais refresh=True -> on rappelle Pennylane quand même.
+    svc.get_open_invoices(refresh=True)
+    assert pny.calls == 2
+    # Le cache est réécrit avec le résultat frais.
+    assert [i.id for i in storage.get_cached_invoices()] == [1, 2, 3, 4]
+
+
+def test_build_dunning_rows_refresh_propagates_to_pennylane(storage):
+    pny = FakePennylane(INVOICES)
+    svc = LedgerService(pny, storage)
+
+    svc.build_dunning_rows(TODAY)               # 1er appel : remplit le cache
+    svc.build_dunning_rows(TODAY)               # cache frais -> pas de nouvel appel
+    assert pny.calls == 1
+    svc.build_dunning_rows(TODAY, refresh=True)  # force le rappel Pennylane
+    assert pny.calls == 2
+
+
 # --- aging_for : délègue à core.bucket_for ---
 @pytest.mark.parametrize("due, expected", [
     (None, AgingBucket.NOT_DUE),

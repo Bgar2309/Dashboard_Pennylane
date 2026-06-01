@@ -39,7 +39,8 @@ class ReminderService:
 
     def dunning_view(self, today: date,
                      hsbc_txs: list[BankTransaction] | None = None,
-                     min_days_between_reminders: int = 8) -> list[CustomerDunningRow]:
+                     min_days_between_reminders: int = 8,
+                     refresh: bool = False) -> list[CustomerDunningRow]:
         """Aging + blocage paiement (HSBC+Revolut) + historique (anti-spam).
 
         Part de l'aging brut du ledger, puis :
@@ -49,8 +50,11 @@ class ReminderService:
             compte de l'historique ;
           - masque les clients relancés depuis moins de
             ``min_days_between_reminders`` jours (anti-spam temporel).
+
+        ``refresh=True`` est propagé à ``build_dunning_rows`` pour forcer un
+        appel Pennylane frais (bypass du cache).
         """
-        rows = self._ledger.build_dunning_rows(today)
+        rows = self._ledger.build_dunning_rows(today, refresh=refresh)
 
         # Toutes les factures ouvertes connues, pour donner du contexte au matching.
         open_invoices = [inv for row in rows for inv in row.open_invoices]

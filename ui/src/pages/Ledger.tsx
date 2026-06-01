@@ -16,7 +16,7 @@ export function Ledger({
   today: IsoDate;
   onReminderSent?: (entry: ReminderLogEntry) => void;
 }) {
-  const { data, loading, error, fetchDraft, confirmSent, confirming } =
+  const { data, loading, error, fetchDraft, confirmSent, confirming, forceRefresh } =
     useReminders(today);
   const [selectedId, setSelectedId] = useState<number | null>(null);
 
@@ -31,8 +31,18 @@ export function Ledger({
       <div className="panel reveal">
         <div className="panel__head">
           <h3 className="panel__title">Clients à relancer</h3>
-          <span className="eyebrow">
-            {loading ? "chargement…" : `${rows.length} clients`}
+          <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <span className="eyebrow">
+              {loading ? "chargement…" : `${rows.length} clients`}
+            </span>
+            <button
+              type="button"
+              className="btn btn--ghost"
+              onClick={forceRefresh}
+              disabled={loading}
+            >
+              {loading ? "Rafraîchissement…" : "↻ Rafraîchir"}
+            </button>
           </span>
         </div>
         <div className="panel__body panel__body--flush">

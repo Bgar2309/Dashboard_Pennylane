@@ -50,10 +50,11 @@ def _row(**kw) -> CustomerDunningRow:
 
 
 class FakeLedger:
-    def build_dunning_rows(self, today):
+    def build_dunning_rows(self, today, refresh=False):
         return [_row()]
 
-    def get_open_invoices(self, use_cache=True, max_cache_age_s=1800):
+    def get_open_invoices(self, use_cache=True, max_cache_age_s=1800,
+                          refresh=False):
         return [_invoice(), _invoice(id=2, customer_id=99, number="260900")]
 
     def build_statement(self, customer_id):
@@ -85,7 +86,8 @@ class FakeReminders:
     def __init__(self):
         self.confirmed: list[tuple] = []
 
-    def dunning_view(self, today, hsbc_txs=None, min_days_between_reminders=8):
+    def dunning_view(self, today, hsbc_txs=None, min_days_between_reminders=8,
+                     refresh=False):
         return [_row(blocked_by_payment=True)]
 
     def generate_draft(self, customer_id, today):
