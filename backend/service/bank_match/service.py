@@ -60,6 +60,8 @@ class BankMatchService:
         amount = tx.credit  # garanti non None / positif par is_client_payment
         numbers = self.extract_invoice_numbers(tx.label)
 
+        tx_date = tx.value_date
+
         strong = self._find_strong(amount, numbers, open_invoices)
         if strong is not None:
             return PaymentMatch(
@@ -69,6 +71,7 @@ class BankMatchService:
                 matched_invoice_numbers=numbers,
                 reason=(f"N° facture {strong.number} trouvé dans le libellé "
                         f"et montant {amount} ≈ {strong.amount} (±1% ou ±1€)"),
+                date=tx_date,
             )
 
         medium = self._find_medium(tx.label, amount, open_invoices)
@@ -82,6 +85,7 @@ class BankMatchService:
                 reason=(f"Nom client « {inv.customer_name} » similaire "
                         f"(fuzzy {score:.0f} ≥ {_FUZZY_THRESHOLD}) "
                         f"et montant exact {amount}"),
+                date=tx_date,
             )
 
         weak = self._find_weak(amount, open_invoices)
@@ -93,6 +97,7 @@ class BankMatchService:
                 matched_invoice_numbers=numbers,
                 reason=(f"Montant exact {amount} seul "
                         f"(aucun n° de facture ni nom client concordant)"),
+                date=tx_date,
             )
 
         return PaymentMatch(
@@ -100,6 +105,7 @@ class BankMatchService:
             customer_name=None, amount=amount, confidence=MatchConfidence.NONE,
             matched_invoice_numbers=numbers,
             reason=f"Aucune facture ouverte ne correspond au montant {amount}",
+            date=tx_date,
         )
 
     @staticmethod

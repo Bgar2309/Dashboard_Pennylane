@@ -11,9 +11,10 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from core.models import (AgingBucket, Customer, CustomerDunningRow, Invoice,
-                         MatchConfidence, PaymentMatch, ReminderLevel,
-                         ReminderLogEntry)
+from core.models import (AgingBucket, Customer, CustomerDunningRow,
+                         CustomerStatement, Invoice, MatchConfidence,
+                         PaymentMatch, ReminderLevel, ReminderLogEntry,
+                         StatementEntry)
 
 
 class CustomerOut(BaseModel):
@@ -100,6 +101,44 @@ class CustomerDunningRowOut(BaseModel):
             last_reminder=(ReminderLogEntryOut.from_domain(row.last_reminder)
                            if row.last_reminder is not None else None),
             blocked_by_payment=row.blocked_by_payment,
+        )
+
+
+class StatementEntryOut(BaseModel):
+    """Une écriture du relevé de compte client (facture au débit, paiement au
+    crédit), avec le solde courant cumulé."""
+    model_config = ConfigDict(from_attributes=True)
+
+    date: date
+    type: str
+    label: str
+    number: str | None = None
+    debit: Decimal | None = None
+    credit: Decimal | None = None
+    balance: Decimal
+
+    @classmethod
+    def from_domain(cls, e: StatementEntry) -> "StatementEntryOut":
+        return cls(
+            date=e.date, type=e.type, label=e.label, number=e.number,
+            debit=e.debit, credit=e.credit, balance=e.balance,
+        )
+
+
+class CustomerStatementOut(BaseModel):
+    """Relevé de compte complet d'un client : écritures triées + solde final."""
+    model_config = ConfigDict(from_attributes=True)
+
+    customer: CustomerOut
+    entries: list[StatementEntryOut]
+    final_balance: Decimal
+
+    @classmethod
+    def from_domain(cls, s: CustomerStatement) -> "CustomerStatementOut":
+        return cls(
+            customer=CustomerOut.from_domain(s.customer),
+            entries=[StatementEntryOut.from_domain(e) for e in s.entries],
+            final_balance=s.final_balance,
         )
 
 
