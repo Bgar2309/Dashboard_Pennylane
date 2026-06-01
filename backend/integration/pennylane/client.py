@@ -469,11 +469,13 @@ class PennylaneClient:
                 carried_forward += reliquat
                 continue
 
-            entry = raw.get("ledger_entry") or {}
             line_date = self._date(raw.get("date"))
-            # Numéro : extrait du libellé si présent, sinon id de l'écriture.
-            number = (self._number_from_line_label(raw.get("label"))
-                      or str(entry.get("id") or raw["id"]))
+            # Numéro affiché : la DATE de la facture (JJ/MM/AAAA). Le grand livre
+            # n'a pas de numéro de facture exploitable (libellés génériques) et
+            # l'id technique de la ligne/écriture n'a aucun sens à l'écran : on
+            # affiche donc la date de la ligne. L'``id`` reste l'id technique.
+            number = (f"Facture du {line_date.strftime('%d/%m/%Y')}"
+                      if line_date else "Facture")
             due_date = (line_date + timedelta(days=_DEFAULT_PAYMENT_TERM_DAYS)
                         if line_date else None)
             out.append(Invoice(
