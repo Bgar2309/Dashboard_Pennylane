@@ -49,6 +49,7 @@ from typing import Any, Iterator
 import httpx
 
 import config
+from core import reconcile
 from core.models import BankTransaction, Customer, Invoice
 
 logger = logging.getLogger(__name__)
@@ -79,11 +80,9 @@ _DEFAULT_PAYMENT_TERM_DAYS = 30
 # Marqueur des reports à nouveau : Pennylane pose le solde d'ouverture de
 # l'exercice comme une écriture datée du 1er janvier dont le libellé contient
 # « A-Nouveau » (débit ET crédit). Ces lignes servent au calcul du solde et à
-# l'imputation FIFO mais ne sont pas des factures à relancer.
+# l'imputation FIFO mais ne sont pas des factures à relancer. Le rapprochement
+# (anti-doublon A-Nouveau, annulations, FIFO) est délégué à ``core.reconcile``.
 _OPENING_BALANCE_MARKER = "a-nouveau"
-# En-deçà de ce solde net (débit − crédit), le compte est considéré soldé : on
-# ne génère aucune Invoice pour ce client. Tolère les centimes d'arrondi.
-SETTLED_THRESHOLD = Decimal("1.00")
 
 
 def _normalize_name(text: Any) -> str:
@@ -418,34 +417,33 @@ class PennylaneClient:
         return lines
 
     def list_open_invoices(self) -> list[Invoice]:
-        """Encours client réel, par rapprochement débit/crédit FIFO par compte.
+        """Encours client réel, par rapprochement débit/crédit via core.reconcile.
 
         Lit le poste client dans les écritures comptables (comptes 411XXX) et non
         dans ``/customer_invoices``, et NE dépend plus du lettrage (la comptable
         ne lettre pas au fil de l'eau les gros comptes anciens). Pour chaque
-        compte 411 :
+        compte 411, on construit les lignes brutes normalisées
+        (``core.reconcile.RawLine``) et on délègue le rapprochement à
+        ``core.reconcile.reconcile_account``, qui :
 
-        - On sépare débits (factures + à-nouveau débiteurs) et crédits
-          (règlements + avoirs + à-nouveau créditeurs).
-        - ``solde_net = Σ debit − Σ credit``. Si ``solde_net <= SETTLED_THRESHOLD``
-          le compte est soldé : AUCUNE ``Invoice`` n'est émise (le client sort de
-          la liste à relancer).
-        - Sinon, le total des crédits est imputé sur les lignes débitrices de la
-          PLUS ANCIENNE à la plus récente (FIFO) : un règlement éteint d'abord
-          les vieilles créances. Chaque ligne débitrice restante (reliquat > 0)
-          devient une ``Invoice`` portant ce reliquat.
+        - neutralise les annulations (facture + contre-passation de même date et
+          montant) ;
+        - exclut les reports « A-Nouveau » qui ne font que recopier des factures
+          DÉJÀ présentes dans la fenêtre (anti double-comptage du solde
+          d'ouverture), tout en conservant les A-Nouveau légitimes (créance
+          réellement antérieure à la fenêtre) ;
+        - impute en FIFO le total des crédits sur les débits restants.
 
-        Les lignes « A-Nouveau » (reports à nouveau) servent au calcul du solde
-        et à l'imputation FIFO mais ne sont jamais des factures affichables ; un
-        reliquat porté par un à-nouveau est rattaché à une ``Invoice`` générique
-        « Solde antérieur » datée du début de fenêtre (aging/total préservés).
+        Chaque créance résiduelle (``OpenItem``) devient une ``Invoice``. Si le
+        compte est soldé, ``reconcile_account`` rend ``[]`` et aucune ``Invoice``
+        n'est émise pour ce client.
         """
         lines = self.list_open_receivable_lines()
         names = self._ledger_account_names
         window_start = self._receivable_window_start()
 
-        # Regroupe les lignes par compte, en préservant l'ordre (déjà trié date
-        # croissante par l'API), pour un rapprochement FIFO compte par compte.
+        # Regroupe les lignes par compte (l'ordre n'importe pas : reconcile_account
+        # re-trie), pour un rapprochement compte par compte.
         by_account: dict[int, list[dict[str, Any]]] = {}
         for raw in lines:
             account = raw.get("ledger_account") or {}
@@ -454,89 +452,46 @@ class PennylaneClient:
 
         out: list[Invoice] = []
         for account_id, account_lines in by_account.items():
-            out.extend(self._match_account_fifo(
-                account_id, account_lines, names.get(account_id, ""),
-                window_start))
+            raw_lines = [self._raw_reconcile_line(raw) for raw in account_lines]
+            customer_name = names.get(account_id, "")
+            for item in reconcile.reconcile_account(raw_lines, window_start):
+                out.append(self._open_item_to_invoice(
+                    item, account_id, customer_name))
         return out
 
-    def _match_account_fifo(self, account_id: int,
-                            lines: list[dict[str, Any]], customer_name: str,
-                            window_start: date) -> list[Invoice]:
-        """Rapprochement FIFO d'un compte 411 -> liste d'``Invoice`` à relancer.
+    def _raw_reconcile_line(self, raw: dict[str, Any]) -> reconcile.RawLine:
+        """Traduit une ligne d'écriture brute Pennylane en ``reconcile.RawLine``."""
+        return reconcile.RawLine(
+            id=raw["id"],
+            date=self._date(raw.get("date")),
+            debit=self._decimal(raw.get("debit")),
+            credit=self._decimal(raw.get("credit")),
+            label=raw.get("label") or "",
+            is_opening_balance=self._is_opening_balance(raw.get("label")),
+            invoice_number=self._number_from_line_label(raw.get("label")),
+        )
 
-        Voir ``list_open_invoices``. Rend une liste vide si le compte est soldé
-        (``solde_net <= SETTLED_THRESHOLD``).
+    def _open_item_to_invoice(self, item: reconcile.OpenItem, account_id: int,
+                              customer_name: str) -> Invoice:
+        """Convertit une créance résiduelle (``OpenItem``) en ``Invoice``.
+
+        À défaut de numéro de facture exploitable, on affiche la DATE de la ligne
+        (« Facture du JJ/MM/AAAA ») : le grand livre n'a pas de numéro fiable et
+        l'id technique n'a aucun sens à l'écran. L'``id`` reste l'id de la ligne.
         """
-        # Lignes débitrices (net > 0), de la plus ancienne à la plus récente
-        # (les lignes arrivent déjà triées date croissante), et total des crédits.
-        debit_lines: list[tuple[dict[str, Any], Decimal]] = []
-        total_credit = Decimal("0")
-        for raw in lines:
-            net = self._decimal(raw.get("debit")) - self._decimal(raw.get("credit"))
-            if net > 0:
-                debit_lines.append((raw, net))
-            elif net < 0:
-                total_credit += -net
-
-        total_debit = sum((amt for _, amt in debit_lines), Decimal("0"))
-        if total_debit - total_credit <= SETTLED_THRESHOLD:
-            return []  # compte soldé : rien à relancer.
-
-        out: list[Invoice] = []
-        carried_forward = Decimal("0")  # reliquats portés par des à-nouveau.
-        remaining_credit = total_credit
-        for raw, debit_amount in debit_lines:
-            # Imputation FIFO : le crédit éteint d'abord les plus vieilles lignes.
-            applied = min(remaining_credit, debit_amount)
-            remaining_credit -= applied
-            reliquat = debit_amount - applied
-            if reliquat <= 0:
-                continue  # ligne entièrement couverte -> disparaît.
-
-            if self._is_opening_balance(raw.get("label")):
-                # Un à-nouveau n'est pas une facture affichable : on cumule son
-                # reliquat dans la ligne générique « Solde antérieur ».
-                carried_forward += reliquat
-                continue
-
-            line_date = self._date(raw.get("date"))
-            # Numéro affiché : la DATE de la facture (JJ/MM/AAAA). Le grand livre
-            # n'a pas de numéro de facture exploitable (libellés génériques) et
-            # l'id technique de la ligne/écriture n'a aucun sens à l'écran : on
-            # affiche donc la date de la ligne. L'``id`` reste l'id technique.
-            number = (f"Facture du {line_date.strftime('%d/%m/%Y')}"
-                      if line_date else "Facture")
-            due_date = (line_date + timedelta(days=_DEFAULT_PAYMENT_TERM_DAYS)
-                        if line_date else None)
-            out.append(Invoice(
-                id=raw["id"],
-                number=number,
-                customer_id=account_id,
-                customer_name=customer_name,
-                date=line_date or date.min,
-                due_date=due_date,
-                amount=debit_amount,
-                currency="EUR",
-                paid=False,
-                remaining_amount=reliquat,
-            ))
-
-        if carried_forward > 0:
-            # Reliquat antérieur non rattaché à une facture (porté par un report
-            # à nouveau) : on le matérialise pour ne pas le perdre (aging/total).
-            out.append(Invoice(
-                id=account_id,
-                number="Solde antérieur",
-                customer_id=account_id,
-                customer_name=customer_name,
-                date=window_start,
-                due_date=window_start + timedelta(days=_DEFAULT_PAYMENT_TERM_DAYS),
-                amount=carried_forward,
-                currency="EUR",
-                paid=False,
-                remaining_amount=carried_forward,
-            ))
-        return out
+        number = item.invoice_number or f"Facture du {item.date:%d/%m/%Y}"
+        return Invoice(
+            id=item.source_line_id,
+            number=number,
+            customer_id=account_id,
+            customer_name=customer_name,
+            date=item.date,
+            due_date=item.date + timedelta(days=_DEFAULT_PAYMENT_TERM_DAYS),
+            amount=item.amount_original,
+            currency="EUR",
+            paid=False,
+            remaining_amount=item.amount_remaining,
+        )
 
     def hsbc_accounting_boundary(self) -> date | None:
         """Frontière comptable HSBC : date de la dernière écriture du journal BQ1.

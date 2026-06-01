@@ -459,25 +459,23 @@ def test_settled_account_produces_no_invoice(client):
     assert 1003 not in customer_ids
 
 
-def test_opening_balance_not_displayable_and_carry_forward(client):
-    """Les lignes « A-Nouveau » ne sont pas des factures affichables ; leur
-    reliquat est porté par une Invoice générique « Solde antérieur »."""
+def test_opening_balance_legitimate_carries_residual(client):
+    """Un A-Nouveau LÉGITIME (sans facture doublon dans la fenêtre) porte son
+    propre reliquat : il devient une Invoice à sa date et son id de ligne."""
     invoices = [i for i in client.list_open_invoices() if i.customer_id == 1004]
-    ids = {i.id for i in invoices}
-    # La ligne A-Nouveau (5008) n'est jamais une facture affichable.
-    assert 5008 not in ids
 
-    # La facture réelle 5009 reste due, n° = date de la ligne affichée.
+    # La facture réelle 5009 reste due ; le n° est extrait du libellé (260500).
     fac = next(i for i in invoices if i.id == 5009)
-    assert fac.number == "Facture du 01/02/2026"
+    assert fac.number == "260500"
     assert fac.amount == Decimal("800.0")
     assert fac.remaining_amount == Decimal("800.0")
 
-    # Le reliquat de l'à-nouveau (500) est matérialisé en « Solde antérieur ».
-    solde = next(i for i in invoices if i.number == "Solde antérieur")
-    assert solde.amount == Decimal("500.0")
+    # L'à-nouveau 5008 est légitime (aucune facture antérieure ne le double) :
+    # son reliquat (500) est porté par l'Invoice de la ligne elle-même.
+    solde = next(i for i in invoices if i.id == 5008)
+    assert solde.amount == Decimal("5000.0")
     assert solde.remaining_amount == Decimal("500.0")
-    assert solde.date == _expected_window_start()
+    assert solde.date == date(2026, 1, 1)
 
 
 def test_list_open_invoices_lines_filtered_by_account(client, calls):
@@ -492,6 +490,67 @@ def test_list_open_invoices_lines_filtered_by_account(client, calls):
                 assert cond["operator"] == "eq"
                 accounts_queried.add(cond["value"])
     assert accounts_queried == {1001, 1002, 1003, 1004}
+
+
+def test_anouveau_duplicating_window_invoices_yields_single_residual():
+    """A-Nouveau 2026 doublonnant des factures 2025 + leurs paiements.
+
+    Un compte porte deux factures 2025 (dont une partiellement payée) et un
+    report « A-Nouveau » au 1er janvier 2026 qui reprend le solde de clôture
+    (= reliquat de la facture B). Sans anti-doublon, l'à-nouveau gonflerait
+    l'encours (double comptage). Via core.reconcile, il est neutralisé : il ne
+    reste qu'UNE seule Invoice résiduelle (la facture B non soldée)."""
+    account_lines = [
+        {"id": 6001, "label": "FAC ALPHA – 250101", "debit": "1000.0",
+         "credit": "0.0", "date": "2025-06-01",
+         "ledger_account": {"id": 2001, "number": "411DUP"},
+         "ledger_entry": {"id": 90001}},
+        {"id": 6002, "label": "FAC BETA – 250202", "debit": "2000.0",
+         "credit": "0.0", "date": "2025-09-01",
+         "ledger_account": {"id": 2001, "number": "411DUP"},
+         "ledger_entry": {"id": 90002}},
+        {"id": 6003, "label": "Virement DUP", "debit": "0.0",
+         "credit": "1000.0", "date": "2025-12-01",
+         "ledger_account": {"id": 2001, "number": "411DUP"},
+         "ledger_entry": {"id": 90003}},
+        {"id": 6004, "label": "A-Nouveau", "debit": "2000.0",
+         "credit": "0.0", "date": "2026-01-01",
+         "ledger_account": {"id": 2001, "number": "411DUP"},
+         "ledger_entry": {"id": 90004}},
+    ]
+    accounts_payload = {
+        "items": [{"id": 2001, "number": "411DUP", "label": "DUP CLIENT",
+                   "type": "customer", "enabled": True, "letterable": True}],
+        "has_more": False, "next_cursor": None,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        path = request.url.path
+        if path.endswith("/ledger_accounts"):
+            return httpx.Response(200, json=accounts_payload)
+        if path.endswith("/ledger_entry_lines"):
+            return httpx.Response(200, json={
+                "items": account_lines, "has_more": False, "next_cursor": None})
+        return httpx.Response(404, json={"error": f"unhandled {path}"})
+
+    http = httpx.Client(base_url=BASE_URL, transport=httpx.MockTransport(handler))
+    c = PennylaneClient(token="t", base_url=BASE_URL, client=http)
+    try:
+        invoices = c.list_open_invoices()
+    finally:
+        c.close()
+
+    # L'à-nouveau (6004) est exclu (doublon de la facture B) : une seule créance.
+    assert len(invoices) == 1
+    inv = invoices[0]
+    assert inv.id == 6002              # facture B, partiellement impayée
+    assert inv.customer_id == 2001
+    assert inv.customer_name == "DUP CLIENT"
+    assert inv.amount == Decimal("2000.0")
+    assert inv.remaining_amount == Decimal("2000.0")
+    # Aucune Invoice n'est issue de la ligne A-Nouveau doublon.
+    assert 6004 not in {i.id for i in invoices}
 
 
 def test_since_filter_sent_as_json(client, calls):
