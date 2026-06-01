@@ -374,6 +374,30 @@ def test_list_customer_ledger_accounts_excludes_generic_and_reserved(client):
     assert 6666 not in accounts
 
 
+def test_list_customer_ledger_accounts_excludes_configured_names(client, monkeypatch):
+    """Les clients de ``EXCLUDED_CUSTOMER_NAMES`` sont écartés (casse/accents/
+    séparateurs ignorés) ; un fragment matche s'il est contenu dans le libellé."""
+    monkeypatch.setattr(config, "EXCLUDED_CUSTOMER_NAMES",
+                        ["prozon", "Brady  Groupe"])
+    accounts = client.list_customer_ledger_accounts()
+    # 1003 "PROZON" et 1002 "Brady Groupe" sont exclus ; les autres restent.
+    assert accounts == {1001: "SIGNAL ET DECO", 1004: "OLDCO"}
+
+
+def test_excluded_account_lines_are_not_fetched(client, calls, monkeypatch):
+    """Un compte exclu n'est jamais paginé sur /ledger_entry_lines (gain vitesse)."""
+    monkeypatch.setattr(config, "EXCLUDED_CUSTOMER_NAMES", ["prozon"])
+    client.list_open_receivable_lines()
+    fetched_accounts = set()
+    for r in calls:
+        if r.url.path.endswith("/ledger_entry_lines"):
+            for f in json.loads(parse_qs(r.url.query.decode())["filter"][0]):
+                if f["field"] == "ledger_account_id":
+                    fetched_accounts.add(f["value"])
+    assert 1003 not in fetched_accounts  # PROZON exclu : aucune ligne récupérée
+    assert 1001 in fetched_accounts      # les autres comptes sont bien lus
+
+
 def test_list_customer_ledger_accounts_filter_and_sort(client, calls):
     client.list_customer_ledger_accounts()
     call = next(r for r in calls if r.url.path.endswith("/ledger_accounts"))

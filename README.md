@@ -13,6 +13,9 @@ cd backend
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 # Variables : PENNYLANE_TOKEN, DATABASE_PATH, CORS_ORIGINS
+# EXCLUDED_CUSTOMER_NAMES : clients (fragments de nom, séparés par des virgules)
+#   à sortir du poste client — leurs comptes 411 ne sont pas récupérés (relances,
+#   encours, stats) et le fetching est plus rapide. Casse/accents/espaces ignorés.
 uvicorn api.main:app --reload --port 8000
 ```
 
