@@ -4,6 +4,7 @@ Combine ledger (aging) + bank_match (blocage paiement) + storage (historique).
 RÈGLE CRITIQUE : generate_draft n'écrit RIEN. Seul confirm_sent loggue dans la DB
 (appelé quand Bruno clique 'J'ai envoyé cette relance').
 """
+import logging
 from datetime import date
 
 from core import level_for
@@ -13,6 +14,8 @@ from service.bank_match import BankMatchService
 from service.ledger import LedgerService
 from service.reminders.drafts import DraftGenerator
 from storage import Storage
+
+logger = logging.getLogger(__name__)
 
 
 class ReminderService:
@@ -52,8 +55,19 @@ class ReminderService:
         # Toutes les factures ouvertes connues, pour donner du contexte au matching.
         open_invoices = [inv for row in rows for inv in row.open_invoices]
 
-        # Transactions à croiser : HSBC fournis par l'appelant + Revolut (Pennylane).
-        txs = list(hsbc_txs or [])
+        # Frontière HSBC : jusqu'à cette date le lettrage comptable est fiable et
+        # les paiements sont déjà reflétés dans l'encours (lignes 411 lettrées,
+        # donc absentes). On purge les matchs absorbés et on ignore les virements
+        # HSBC manuels antérieurs pour ne pas les rejouer.
+        boundary = self._hsbc_boundary()
+        purged = (self._storage.clear_matches_before(boundary)
+                  if boundary is not None else 0)
+        logger.info("Frontière HSBC = %s, %d matchs purgés", boundary, purged)
+
+        # Transactions à croiser : virements HSBC manuels POSTÉRIEURS à la
+        # frontière (les antérieurs sont déjà absorbés par le lettrage) + Revolut.
+        txs = [tx for tx in (hsbc_txs or [])
+               if boundary is None or tx.value_date > boundary]
         txs.extend(self._revolut_transactions())
 
         matches = self._bank_match.match(txs, open_invoices)
@@ -96,6 +110,23 @@ class ReminderService:
     # ------------------------------------------------------------------ #
     # Internes
     # ------------------------------------------------------------------ #
+    def _hsbc_boundary(self) -> date | None:
+        """Frontière comptable HSBC via Pennylane, ou None (= pas de purge).
+
+        Dégrade proprement : si le ledger n'expose pas de client Pennylane, que
+        celui-ci n'a pas la méthode, ou qu'elle échoue, on rend None et aucune
+        purge n'est faite.
+        """
+        pennylane = getattr(self._ledger, "_pennylane", None)
+        getter = getattr(pennylane, "hsbc_accounting_boundary", None)
+        if getter is None:
+            return None
+        try:
+            return getter()
+        except Exception:  # le réseau ne doit jamais casser la vue relance
+            logger.warning("Frontière HSBC indisponible", exc_info=True)
+            return None
+
     def _revolut_transactions(self) -> list[BankTransaction]:
         """Transactions des comptes liés à Pennylane (Revolut), via le ledger.
 

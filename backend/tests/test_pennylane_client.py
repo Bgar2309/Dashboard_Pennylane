@@ -158,6 +158,22 @@ def _ledger_lines_response(request: httpx.Request) -> httpx.Response:
                                      "next_cursor": None})
 
 
+# Écritures du journal de banque HSBC (BQ1, id 6716577). Triées -date, limit 1 :
+# la frontière comptable = date de la 1re (la plus récente).
+HSBC_JOURNAL_ID = 6716577
+LEDGER_ENTRIES_RESPONSE = {
+    "items": [{"id": 80001, "date": "2026-04-30", "journal_id": HSBC_JOURNAL_ID}],
+    "has_more": False,
+    "next_cursor": None,
+}
+# Réponse vide (aucune écriture) -> frontière None. Activé par le test au besoin.
+_ledger_entries_payload = {"current": LEDGER_ENTRIES_RESPONSE}
+
+
+def _ledger_entries_response(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, json=_ledger_entries_payload["current"])
+
+
 TRANSACTIONS_PAGES = {
     None: {
         "items": [
@@ -197,6 +213,8 @@ def make_handler(calls: list[httpx.Request] | None = None):
             return _page_for(LEDGER_ACCOUNTS_PAGES, request)
         if path.endswith("/ledger_entry_lines"):
             return _ledger_lines_response(request)
+        if path.endswith("/ledger_entries"):
+            return _ledger_entries_response(request)
         if path.endswith("/transactions"):
             return _page_for(TRANSACTIONS_PAGES, request)
         if "/customer_invoices/" in path:
@@ -408,6 +426,38 @@ def test_transaction_credit_and_debit_sign(client):
     debit = by_ref["999"]
     assert debit.debit == Decimal("120.50")
     assert debit.credit is None
+
+
+# --------------------------------------------------------------------------- #
+# Frontière comptable HSBC (journal BQ1)
+# --------------------------------------------------------------------------- #
+def test_hsbc_accounting_boundary_returns_last_entry_date(client):
+    """La frontière = date de la dernière écriture du journal HSBC (BQ1)."""
+    _ledger_entries_payload["current"] = LEDGER_ENTRIES_RESPONSE
+    assert client.hsbc_accounting_boundary() == date(2026, 4, 30)
+
+
+def test_hsbc_accounting_boundary_query_filters_journal_sort_limit(client, calls):
+    """Filtre journal_id eq 6716577, tri -date, limit 1 (pas de page/per_page)."""
+    _ledger_entries_payload["current"] = LEDGER_ENTRIES_RESPONSE
+    client.hsbc_accounting_boundary()
+    call = next(r for r in calls if r.url.path.endswith("/ledger_entries"))
+    query = parse_qs(call.url.query.decode())
+    assert query["sort"] == ["-date"]
+    assert query["limit"] == ["1"]
+    assert "page" not in query and "per_page" not in query
+    assert json.loads(query["filter"][0]) == [
+        {"field": "journal_id", "operator": "eq", "value": 6716577}]
+
+
+def test_hsbc_accounting_boundary_none_when_empty(client):
+    """Aucune écriture dans le journal -> frontière None."""
+    _ledger_entries_payload["current"] = {
+        "items": [], "has_more": False, "next_cursor": None}
+    try:
+        assert client.hsbc_accounting_boundary() is None
+    finally:
+        _ledger_entries_payload["current"] = LEDGER_ENTRIES_RESPONSE
 
 
 # --------------------------------------------------------------------------- #

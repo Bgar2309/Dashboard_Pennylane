@@ -191,6 +191,9 @@ class StatsOut(BaseModel):
     retard_moyen_pondere: Decimal
     total_par_bucket: dict[str, Decimal]
     top_overdue: list[TopOverdueItem]
+    # Frontière comptable HSBC : date jusqu'à laquelle le lettrage est à jour.
+    # Au-delà, l'UI signale un rapprochement manuel. None si indisponible.
+    hsbc_boundary: date | None = None
 
 
 class ConfirmSentIn(BaseModel):
