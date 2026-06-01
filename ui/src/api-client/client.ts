@@ -6,6 +6,7 @@
 import type {
   ConfirmSentIn,
   CustomerDunningRow,
+  CustomerStatement,
   Draft,
   Invoice,
   IsoDate,
@@ -98,6 +99,18 @@ export function getCustomerInvoices(
   signal?: AbortSignal,
 ): Promise<Invoice[]> {
   return request<Invoice[]>(`/api/ledger/${customerId}`, { signal });
+}
+
+/** GET /api/ledger/{customer_id}/statement → relevé de compte complet
+ * (factures + paiements, triés par date, avec solde courant). */
+export function getCustomerStatement(
+  customerId: number,
+  signal?: AbortSignal,
+): Promise<CustomerStatement> {
+  return request<CustomerStatement>(
+    `/api/ledger/${customerId}/statement`,
+    { signal },
+  );
 }
 
 // --- reminders ---
