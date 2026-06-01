@@ -1,0 +1,965 @@
+/* =========================================================================
+   « Le Grand Livre » — thème éditorial comptable pour Relance EHS.
+   Papier ivoire · encre profonde · accent sang-de-bœuf · échelle d'âge chaude.
+   Fraunces (titres) · Hanken Grotesk (texte) · IBM Plex Mono (chiffres).
+   ========================================================================= */
+
+:root {
+  /* Papier & surfaces */
+  --paper: #efe8da;
+  --paper-edge: #e6ddcb;
+  --surface: #faf6ed;
+  --surface-raised: #fffdf7;
+  --rule: #ddd2bd;
+  --rule-soft: #e7dccaff;
+  --rule-strong: #c7b9a0;
+
+  /* Encre */
+  --ink: #221d16;
+  --ink-soft: #5d544709;
+  --ink-soft-solid: #5f5648;
+  --ink-faint: #948a79;
+
+  /* Accent */
+  --accent: #9f3019;
+  --accent-bright: #c44a28;
+  --accent-wash: #f3e2d8;
+
+  /* Échelle d'âge (heat scale) */
+  --age-notdue: #4f7a58;
+  --age-0: #b08a1e;
+  --age-30: #c97e26;
+  --age-60: #c1542a;
+  --age-90: #8c2a18;
+
+  /* Sémantique */
+  --paid: #3f6b46;
+  --paid-wash: #e2ebdf;
+
+  --shadow-card: 0 1px 0 #fff inset, 0 1px 2px rgba(40, 30, 15, 0.06),
+    0 8px 24px -16px rgba(40, 30, 15, 0.4);
+
+  --font-display: "Fraunces", Georgia, serif;
+  --font-body: "Hanken Grotesk", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  --rail-w: 232px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-body);
+  color: var(--ink);
+  background-color: var(--paper);
+  /* Grain papier + filets très subtils, comme une page de registre. */
+  background-image:
+    repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 31px,
+      rgba(120, 95, 60, 0.05) 31px,
+      rgba(120, 95, 60, 0.05) 32px
+    ),
+    radial-gradient(circle at 18% 12%, rgba(159, 48, 25, 0.04), transparent 38%);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--surface-raised);
+}
+
+/* Tabular figures partout où l'on aligne des montants. */
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+/* Étiquette « petites capitales » récurrente sur les en-têtes de section. */
+.eyebrow {
+  font-family: var(--font-body);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+/* =========================== Shell / Layout ============================== */
+
+.app {
+  display: grid;
+  grid-template-columns: var(--rail-w) 1fr;
+  min-height: 100vh;
+}
+
+/* --- Tranche / colonne (sidebar) --- */
+.rail {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  background: linear-gradient(180deg, #2a221a, #1c1711);
+  color: #e9dcc6;
+  display: flex;
+  flex-direction: column;
+  padding: 28px 22px;
+  border-right: 3px solid var(--accent);
+}
+
+.rail__brand {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 40px;
+}
+
+.rail__mark {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 27px;
+  line-height: 0.98;
+  letter-spacing: -0.01em;
+  font-optical-sizing: auto;
+}
+
+.rail__mark em {
+  font-style: italic;
+  color: var(--accent-bright);
+}
+
+.rail__sub {
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #a8987d;
+  margin-top: 6px;
+}
+
+.rail__nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.navitem {
+  appearance: none;
+  background: none;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+  color: #c9bca3;
+  font-family: var(--font-body);
+  font-size: 15px;
+  font-weight: 500;
+  padding: 11px 14px;
+  border-radius: 7px;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.navitem__no {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: #8a7a5e;
+}
+
+.navitem:hover {
+  background: rgba(255, 240, 215, 0.06);
+  color: #f3e8d4;
+}
+
+.navitem--active {
+  background: var(--surface-raised);
+  color: var(--ink);
+}
+
+.navitem--active .navitem__no {
+  color: var(--accent);
+}
+
+.rail__foot {
+  margin-top: auto;
+  font-size: 11px;
+  line-height: 1.6;
+  color: #8a7a5e;
+  border-top: 1px solid rgba(233, 220, 198, 0.12);
+  padding-top: 16px;
+}
+
+.rail__foot strong {
+  color: #c9bca3;
+  font-weight: 600;
+}
+
+/* --- Zone de contenu --- */
+.main {
+  min-width: 0;
+  padding: 38px 48px 80px;
+  max-width: 1320px;
+}
+
+.masthead {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  padding-bottom: 18px;
+  margin-bottom: 30px;
+  border-bottom: 2px solid var(--ink);
+  position: relative;
+}
+
+.masthead::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: -5px;
+  width: 100%;
+  height: 1px;
+  background: var(--ink);
+}
+
+.masthead__title {
+  font-family: var(--font-display);
+  font-optical-sizing: auto;
+  font-weight: 600;
+  font-size: 38px;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+.masthead__lede {
+  margin: 9px 0 0;
+  color: var(--ink-soft-solid);
+  font-size: 14.5px;
+  max-width: 52ch;
+}
+
+.masthead__date {
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.masthead__date .num {
+  font-size: 15px;
+  font-weight: 500;
+}
+
+/* =========================== Sections ==================================== */
+
+.section {
+  margin-top: 38px;
+}
+
+.section__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.section__title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 20px;
+  letter-spacing: -0.01em;
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.section__title::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  background: var(--accent);
+  transform: rotate(45deg);
+  flex-shrink: 0;
+}
+
+.grid {
+  display: grid;
+  gap: 18px;
+}
+
+.grid--cards {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.grid--detail {
+  grid-template-columns: 1.05fr 0.95fr;
+  align-items: start;
+}
+
+.grid--dash {
+  grid-template-columns: 1.6fr 1fr;
+  align-items: start;
+}
+
+@media (max-width: 1100px) {
+  .grid--cards {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .grid--detail,
+  .grid--dash {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* =========================== Carte (panel) =============================== */
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  box-shadow: var(--shadow-card);
+}
+
+.panel__head {
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid var(--rule);
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.panel__title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 17px;
+  margin: 0;
+}
+
+.panel__body {
+  padding: 18px 20px;
+}
+
+.panel__body--flush {
+  padding: 0;
+}
+
+/* =========================== KPI ========================================= */
+
+.kpi {
+  position: relative;
+  background: var(--surface-raised);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  padding: 18px 18px 20px;
+  overflow: hidden;
+  box-shadow: var(--shadow-card);
+}
+
+.kpi::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 4px;
+  background: var(--accent);
+  opacity: 0.85;
+}
+
+.kpi--accent::before {
+  background: var(--accent);
+}
+.kpi--sage::before {
+  background: var(--age-notdue);
+}
+.kpi--gold::before {
+  background: var(--age-0);
+}
+.kpi--rust::before {
+  background: var(--age-60);
+}
+
+.kpi__label {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin: 6px 0 12px;
+}
+
+.kpi__value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  font-size: 30px;
+  line-height: 1;
+  letter-spacing: -0.025em;
+  color: var(--ink);
+}
+
+.kpi__value .unit {
+  font-size: 16px;
+  color: var(--ink-faint);
+  margin-left: 3px;
+}
+
+.kpi__foot {
+  margin-top: 11px;
+  font-size: 12.5px;
+  color: var(--ink-soft-solid);
+}
+
+/* =========================== Aging bar =================================== */
+
+.aging__bar {
+  display: flex;
+  height: 30px;
+  width: 100%;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--rule-strong);
+  background: var(--paper-edge);
+}
+
+.aging__seg {
+  height: 100%;
+  min-width: 2px;
+  transition: filter 0.15s ease;
+}
+
+.aging__seg:hover {
+  filter: brightness(1.08) saturate(1.1);
+}
+
+.aging__legend {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px 18px;
+  margin-top: 18px;
+}
+
+.aging__row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.aging__swatch {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.aging__rk {
+  font-size: 12.5px;
+  color: var(--ink-soft-solid);
+}
+
+.aging__rv {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* =========================== Tags / badges =============================== */
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.tag__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.lvl-none {
+  color: var(--ink-faint);
+  background: var(--paper-edge);
+  border-color: var(--rule);
+}
+.lvl-first {
+  color: #8a6a12;
+  background: #f6ecd2;
+  border-color: #e4d3a3;
+}
+.lvl-second {
+  color: #a8521c;
+  background: #f6e3d3;
+  border-color: #e7c4a3;
+}
+.lvl-formal {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Buckets d'âge en pastille */
+.bk {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 5px;
+  color: #fff;
+}
+.bk-not_due {
+  background: var(--age-notdue);
+}
+.bk-0-30 {
+  background: var(--age-0);
+}
+.bk-30-60 {
+  background: var(--age-30);
+}
+.bk-60-90 {
+  background: var(--age-60);
+}
+.bk-90\+ {
+  background: var(--age-90);
+}
+
+/* Badge paiement banque */
+.paybadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 3px 10px 3px 8px;
+  border-radius: 999px;
+  color: var(--paid);
+  background: var(--paid-wash);
+  border: 1px solid #c3d6bf;
+}
+
+.paybadge svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* Confiance d'un match bancaire */
+.conf {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 5px;
+}
+.conf-strong {
+  color: var(--paid);
+  background: var(--paid-wash);
+}
+.conf-medium {
+  color: #8a6a12;
+  background: #f6ecd2;
+}
+.conf-weak {
+  color: #a8521c;
+  background: #f6e3d3;
+}
+.conf-none {
+  color: var(--ink-faint);
+  background: var(--paper-edge);
+}
+
+/* =========================== Tables ====================================== */
+
+.tbl {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+.tbl thead th {
+  text-align: left;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  padding: 12px 16px;
+  border-bottom: 1.5px solid var(--ink);
+  background: var(--paper-edge);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.tbl tbody td {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: middle;
+}
+
+.tbl tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.tbl .r {
+  text-align: right;
+}
+
+.tbl__amount {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.tbl--rows tbody tr {
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.tbl--rows tbody tr:hover {
+  background: var(--surface-raised);
+}
+
+.tbl tbody tr.is-selected {
+  background: var(--accent-wash);
+}
+
+.tbl tbody tr.is-selected td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.tbl tbody tr.is-blocked {
+  color: var(--ink-faint);
+}
+
+.tbl tbody tr.is-blocked .tbl__amount {
+  text-decoration: line-through;
+  text-decoration-color: var(--rule-strong);
+}
+
+.cust {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cust__name {
+  font-weight: 600;
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.cust__meta {
+  font-size: 11.5px;
+  color: var(--ink-faint);
+}
+
+.cellstack {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+}
+
+/* =========================== Boutons ===================================== */
+
+.btn {
+  appearance: none;
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  border-radius: 8px;
+  padding: 10px 18px;
+  border: 1px solid transparent;
+  transition: transform 0.08s ease, background 0.15s ease, box-shadow 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.btn:active {
+  transform: translateY(1px);
+}
+
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.btn--primary {
+  background: var(--accent);
+  color: #fff7ef;
+  box-shadow: 0 6px 16px -10px var(--accent);
+}
+
+.btn--primary:not(:disabled):hover {
+  background: var(--accent-bright);
+}
+
+.btn--ghost {
+  background: var(--surface-raised);
+  color: var(--ink);
+  border-color: var(--rule-strong);
+}
+
+.btn--ghost:not(:disabled):hover {
+  border-color: var(--ink);
+}
+
+/* =========================== Brouillon (DraftPanel) ====================== */
+
+.draft {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.72;
+  white-space: pre-wrap;
+  color: var(--ink);
+  background:
+    repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 27px,
+      rgba(120, 95, 60, 0.07) 27px,
+      rgba(120, 95, 60, 0.07) 28px
+    ),
+    var(--surface-raised);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  padding: 18px 20px;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.draft__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.draft__note {
+  font-size: 12px;
+  color: var(--ink-faint);
+  max-width: 34ch;
+}
+
+/* =========================== Dropzone (BankUploadDrop) =================== */
+
+.drop {
+  border: 1.5px dashed var(--rule-strong);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  padding: 26px 22px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.drop:hover,
+.drop--over {
+  border-color: var(--accent);
+  background: var(--accent-wash);
+}
+
+.drop__icon {
+  width: 30px;
+  height: 30px;
+  color: var(--accent);
+  margin-bottom: 8px;
+}
+
+.drop__title {
+  font-weight: 600;
+  font-size: 14.5px;
+}
+
+.drop__hint {
+  font-size: 12px;
+  color: var(--ink-faint);
+  margin-top: 4px;
+}
+
+.drop input[type="file"] {
+  display: none;
+}
+
+/* =========================== États divers =============================== */
+
+.note {
+  font-size: 13px;
+  color: var(--ink-soft-solid);
+  line-height: 1.6;
+}
+
+.empty {
+  padding: 30px 20px;
+  text-align: center;
+  color: var(--ink-faint);
+  font-size: 13.5px;
+}
+
+.skel {
+  background: linear-gradient(
+    90deg,
+    var(--paper-edge) 25%,
+    var(--surface-raised) 50%,
+    var(--paper-edge) 75%
+  );
+  background-size: 200% 100%;
+  border-radius: 6px;
+  animation: shimmer 1.3s linear infinite;
+}
+
+@keyframes shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.errbox {
+  border: 1px solid #e2b3a6;
+  background: #f7e6e0;
+  color: #7a2a18;
+  border-radius: 8px;
+  padding: 12px 16px;
+  font-size: 13px;
+}
+
+.divider {
+  height: 1px;
+  background: var(--rule);
+  margin: 18px 0;
+}
+
+/* =========================== Toasts ===================================== */
+
+.toasts {
+  position: fixed;
+  top: 22px;
+  right: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 50;
+}
+
+.toast {
+  background: var(--ink);
+  color: #f4ead7;
+  border-radius: 9px;
+  padding: 13px 18px;
+  min-width: 280px;
+  max-width: 380px;
+  box-shadow: 0 18px 40px -18px rgba(0, 0, 0, 0.55);
+  border-left: 4px solid var(--accent-bright);
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  animation: toast-in 0.28s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+
+.toast--success {
+  border-left-color: #7fbf8a;
+}
+
+.toast__icon {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.toast__title {
+  font-weight: 600;
+  font-size: 13.5px;
+}
+
+.toast__msg {
+  font-size: 12.5px;
+  color: #c9bca3;
+  margin-top: 2px;
+  line-height: 1.5;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px) scale(0.98);
+  }
+}
+
+/* =========================== Reveal au chargement ======================== */
+
+.reveal {
+  animation: rise 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+}
+
+.stagger > * {
+  animation: rise 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.stagger > *:nth-child(1) {
+  animation-delay: 0.02s;
+}
+.stagger > *:nth-child(2) {
+  animation-delay: 0.07s;
+}
+.stagger > *:nth-child(3) {
+  animation-delay: 0.12s;
+}
+.stagger > *:nth-child(4) {
+  animation-delay: 0.17s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+/* Scrollbars discrètes */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule-strong) transparent;
+}
