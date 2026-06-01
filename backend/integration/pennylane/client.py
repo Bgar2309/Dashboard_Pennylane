@@ -38,8 +38,10 @@ Le filtre ``since`` utilise le format de filtre brut v2 :
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
+import unicodedata
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterator
@@ -48,6 +50,8 @@ import httpx
 
 import config
 from core.models import BankTransaction, Customer, Invoice
+
+logger = logging.getLogger(__name__)
 
 # Page maximale autorisée par l'API v2.
 _PAGE_LIMIT = 100
@@ -80,6 +84,17 @@ _OPENING_BALANCE_MARKER = "a-nouveau"
 # En-deçà de ce solde net (débit − crédit), le compte est considéré soldé : on
 # ne génère aucune Invoice pour ce client. Tolère les centimes d'arrondi.
 SETTLED_THRESHOLD = Decimal("1.00")
+
+
+def _normalize_name(text: Any) -> str:
+    """Forme comparable d'un nom : minuscule, sans accents ni séparateurs.
+
+    Ne garde que ``[a-z0-9]`` (espaces, tirets et accents neutralisés) pour que
+    « MySignalisation Prozon » et « MY SIGNALISATION PROZON » se comparent égaux.
+    """
+    decomposed = unicodedata.normalize("NFKD", str(text or ""))
+    stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]+", "", stripped.lower())
 
 
 class PennylaneClient:
@@ -337,7 +352,10 @@ class PennylaneClient:
         ``type == "customer"`` et ``enabled`` : on écarte les comptes
         ``reserved`` (41106xxx e-commerce), les comptes désactivés
         (``enabled == False``) et les comptes génériques au libellé « Clients »
-        (411, 41102, 4111, 4117, 41106) qui ne portent aucun tiers. Pagine tout.
+        (411, 41102, 4111, 4117, 41106) qui ne portent aucun tiers. On écarte
+        aussi les clients listés dans ``config.EXCLUDED_CUSTOMER_NAMES`` (bons
+        payeurs à gros volume) : leurs lignes ne sont jamais récupérées. Pagine
+        tout.
 
         Le résultat est mis en cache sur l'instance (``_ledger_account_names``)
         pour servir de jointure id -> nom aux lignes d'écriture.
@@ -347,6 +365,12 @@ class PennylaneClient:
                                    "value": _CUSTOMER_ACCOUNT_PREFIX}]),
             "sort": "id",  # le tri n'accepte que ``id`` (sinon 400).
         }
+        # Fragments de noms à exclure (bons payeurs à gros volume), normalisés une
+        # seule fois. Un compte est écarté si l'un des fragments est contenu dans
+        # son libellé normalisé : ses lignes ne seront jamais paginées (gain de
+        # vitesse) et il sort des relances / encours / stats.
+        excluded = [n for n in (_normalize_name(name)
+                                for name in config.EXCLUDED_CUSTOMER_NAMES) if n]
         accounts: dict[int, str] = {}
         for raw in self._paginate("/ledger_accounts", params):
             if raw.get("type") != "customer":
@@ -356,7 +380,13 @@ class PennylaneClient:
             number = str(raw.get("number") or "")
             if number in _GENERIC_CUSTOMER_ACCOUNTS:
                 continue
-            accounts[raw["id"]] = raw.get("label") or number
+            label = raw.get("label") or number
+            norm_label = _normalize_name(label)
+            if any(fragment in norm_label for fragment in excluded):
+                logger.info("Compte client exclu du poste : %s (%s)",
+                            label, number)
+                continue
+            accounts[raw["id"]] = label
         self._ledger_account_names = accounts
         return accounts
 
