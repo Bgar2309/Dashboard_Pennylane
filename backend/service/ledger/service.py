@@ -37,14 +37,19 @@ class LedgerService:
         self._storage = storage
 
     def get_open_invoices(self, use_cache: bool = True,
-                          max_cache_age_s: int = 1800) -> list[Invoice]:
+                          max_cache_age_s: int = 1800,
+                          refresh: bool = False) -> list[Invoice]:
         """Factures non soldées, servies depuis le cache si assez frais.
 
         Si ``use_cache`` et que le cache existe et a moins de ``max_cache_age_s``
         secondes, on rend le cache. Sinon on interroge Pennylane (lecture seule),
         on rafraîchit le cache et on rend le résultat frais.
+
+        ``refresh=True`` force un appel Pennylane frais quel que soit l'âge du
+        cache (équivaut à bypasser le cache) : on interroge Pennylane et on
+        réécrit le cache.
         """
-        if use_cache:
+        if use_cache and not refresh:
             age = self._storage.cache_age_seconds()
             if age is not None and age <= max_cache_age_s:
                 return self._storage.get_cached_invoices()
@@ -57,15 +62,19 @@ class LedgerService:
         """Bucket d'ancienneté d'une facture (basé sur sa date d'échéance)."""
         return bucket_for(invoice.due_date, today)
 
-    def build_dunning_rows(self, today: date) -> list[CustomerDunningRow]:
+    def build_dunning_rows(self, today: date,
+                           refresh: bool = False) -> list[CustomerDunningRow]:
         """Agrège les factures ouvertes par client.
 
         Pour chaque client : total dû, plus ancienne échéance, pire bucket et
         niveau de relance suggéré. Le niveau est calculé sans historique ni
         banque ici (``last_reminder=None``, ``blocked_by_payment=False``) : le
         module ``reminders`` affinera ensuite.
+
+        ``refresh=True`` est propagé à ``get_open_invoices`` pour forcer un
+        appel Pennylane frais (bypass du cache).
         """
-        invoices = self.get_open_invoices()
+        invoices = self.get_open_invoices(refresh=refresh)
 
         # Regroupe par customer_id (jamais par nom) en préservant l'ordre
         # d'apparition : aucune facture n'est perdue. Les factures « Client

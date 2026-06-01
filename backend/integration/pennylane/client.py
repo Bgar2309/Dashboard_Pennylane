@@ -62,7 +62,9 @@ HSBC_BANK_JOURNAL_ID = 6716577
 # Comptes auxiliaires clients : préfixe de numéro (411XXX).
 _CUSTOMER_ACCOUNT_PREFIX = "411"
 # Comptes génériques « Clients » sans tiers rattaché : à exclure de l'encours.
-_GENERIC_CUSTOMER_ACCOUNTS = {"411", "41102", "4111", "4117"}
+# 41106 = compte générique « Clients - Numéros standards » (à ne pas confondre
+# avec les comptes auxiliaires 41106xxx e-commerce, écartés via type reserved).
+_GENERIC_CUSTOMER_ACCOUNTS = {"411", "41102", "4111", "4117", "41106"}
 # Délai d'échéance par défaut, conditions "30_days" (on n'appelle pas /customers).
 _DEFAULT_PAYMENT_TERM_DAYS = 30
 
@@ -291,9 +293,10 @@ class PennylaneClient:
 
         Source réelle du poste client. On filtre côté API sur ``number``
         commençant par "411", puis on ne garde que les comptes
-        ``type == "customer"`` : on écarte les comptes ``reserved`` (41106xxx
-        e-commerce) et les comptes génériques au libellé « Clients »
-        (411, 41102, 4111, 4117) qui ne portent aucun tiers. Pagine tout.
+        ``type == "customer"`` et ``enabled`` : on écarte les comptes
+        ``reserved`` (41106xxx e-commerce), les comptes désactivés
+        (``enabled == False``) et les comptes génériques au libellé « Clients »
+        (411, 41102, 4111, 4117, 41106) qui ne portent aucun tiers. Pagine tout.
 
         Le résultat est mis en cache sur l'instance (``_ledger_account_names``)
         pour servir de jointure id -> nom aux lignes d'écriture.
@@ -307,6 +310,8 @@ class PennylaneClient:
         for raw in self._paginate("/ledger_accounts", params):
             if raw.get("type") != "customer":
                 continue
+            if raw.get("enabled") is False:
+                continue  # compte désactivé -> hors encours
             number = str(raw.get("number") or "")
             if number in _GENERIC_CUSTOMER_ACCOUNTS:
                 continue

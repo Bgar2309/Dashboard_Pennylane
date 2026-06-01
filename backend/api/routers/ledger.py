@@ -23,20 +23,28 @@ router = APIRouter(prefix="/api/ledger", tags=["ledger"])
 @router.get("", response_model=list[CustomerDunningRowOut])
 def get_ledger(
     today: date | None = None,
+    refresh: bool = False,
     ledger: LedgerService = Depends(get_ledger_service),
 ) -> list[CustomerDunningRowOut]:
-    """Grand livre client agrégé (aging brut, sans banque ni historique)."""
-    rows = ledger.build_dunning_rows(today or date.today())
+    """Grand livre client agrégé (aging brut, sans banque ni historique).
+
+    ``refresh=true`` force un appel Pennylane frais (bypass du cache).
+    """
+    rows = ledger.build_dunning_rows(today or date.today(), refresh=refresh)
     return [CustomerDunningRowOut.from_domain(r) for r in rows]
 
 
 @router.get("/{customer_id}", response_model=list[InvoiceOut])
 def get_customer_invoices(
     customer_id: int,
+    refresh: bool = False,
     ledger: LedgerService = Depends(get_ledger_service),
 ) -> list[InvoiceOut]:
-    """Factures ouvertes d'un client. 404 si le client n'a aucune facture ouverte."""
-    invoices = [inv for inv in ledger.get_open_invoices()
+    """Factures ouvertes d'un client. 404 si le client n'a aucune facture ouverte.
+
+    ``refresh=true`` force un appel Pennylane frais (bypass du cache).
+    """
+    invoices = [inv for inv in ledger.get_open_invoices(refresh=refresh)
                 if inv.customer_id == customer_id]
     if not invoices:
         raise HTTPException(

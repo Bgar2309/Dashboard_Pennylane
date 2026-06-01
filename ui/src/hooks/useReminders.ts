@@ -1,7 +1,7 @@
 // useReminders — vue relances à faire (GET /api/reminders) + actions
 // brouillon / confirmation d'envoi.
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
 import {
   confirmSent as apiConfirmSent,
@@ -25,17 +25,35 @@ export interface UseRemindersResult extends AsyncState<CustomerDunningRow[]> {
   ) => Promise<ReminderLogEntry>;
   /** Vrai pendant un appel `confirmSent`. */
   confirming: boolean;
+  /**
+   * Relance le fetch en FORÇANT un appel Pennylane frais (`refresh=true`),
+   * peu importe l'âge du cache. Distinct du `refresh` normal (qui peut servir
+   * le cache backend).
+   */
+  forceRefresh: () => void;
 }
 
 /** Vue relances : aging + blocage paiement + anti-spam, avec actions. */
 export function useReminders(today?: IsoDate): UseRemindersResult {
+  // Quand vrai, le prochain fetch force le rappel Pennylane (consommé à l'appel).
+  const forceRef = useRef(false);
+
   const fetcher = useCallback(
-    (signal: AbortSignal) => getReminders(today, signal),
+    (signal: AbortSignal) => {
+      const force = forceRef.current;
+      forceRef.current = false; // ne force que le fetch déclenché par forceRefresh
+      return getReminders(today, force, signal);
+    },
     [today],
   );
   const state = useAsync<CustomerDunningRow[]>(fetcher, [today]);
   const { refresh } = state;
   const [confirming, setConfirming] = useState(false);
+
+  const forceRefresh = useCallback(() => {
+    forceRef.current = true;
+    refresh();
+  }, [refresh]);
 
   const fetchDraft = useCallback(
     (customerId: number) => apiGetDraft(customerId, today),
@@ -56,5 +74,5 @@ export function useReminders(today?: IsoDate): UseRemindersResult {
     [refresh],
   );
 
-  return { ...state, fetchDraft, confirmSent, confirming };
+  return { ...state, fetchDraft, confirmSent, confirming, forceRefresh };
 }

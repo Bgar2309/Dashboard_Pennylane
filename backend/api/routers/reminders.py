@@ -25,10 +25,14 @@ router = APIRouter(prefix="/api/reminders", tags=["reminders"])
 @router.get("", response_model=list[CustomerDunningRowOut])
 def get_reminders(
     today: date | None = None,
+    refresh: bool = False,
     reminders: ReminderService = Depends(get_reminder_service),
 ) -> list[CustomerDunningRowOut]:
-    """Vue relances à faire : aging + blocage paiement + historique (anti-spam)."""
-    rows = reminders.dunning_view(today or date.today())
+    """Vue relances à faire : aging + blocage paiement + historique (anti-spam).
+
+    ``refresh=true`` force un appel Pennylane frais (bypass du cache).
+    """
+    rows = reminders.dunning_view(today or date.today(), refresh=refresh)
     return [CustomerDunningRowOut.from_domain(r) for r in rows]
 
 

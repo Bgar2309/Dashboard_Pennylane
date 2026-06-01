@@ -76,12 +76,20 @@ async function request<T>(
 
 // --- ledger ---
 
-/** GET /api/ledger → grand livre client agrégé. */
+/** GET /api/ledger → grand livre client agrégé.
+ *
+ * `refresh=true` force un appel Pennylane frais côté backend (bypass du cache).
+ */
 export function getLedger(
   today?: IsoDate,
+  refresh?: boolean,
   signal?: AbortSignal,
 ): Promise<CustomerDunningRow[]> {
-  return request<CustomerDunningRow[]>("/api/ledger", { signal }, { today });
+  return request<CustomerDunningRow[]>(
+    "/api/ledger",
+    { signal },
+    { today, refresh: refresh ? "true" : undefined },
+  );
 }
 
 /** GET /api/ledger/{customer_id} → factures ouvertes d'un client. */
@@ -94,12 +102,20 @@ export function getCustomerInvoices(
 
 // --- reminders ---
 
-/** GET /api/reminders → vue relances à faire (blocage banque + anti-spam). */
+/** GET /api/reminders → vue relances à faire (blocage banque + anti-spam).
+ *
+ * `refresh=true` force un appel Pennylane frais côté backend (bypass du cache).
+ */
 export function getReminders(
   today?: IsoDate,
+  refresh?: boolean,
   signal?: AbortSignal,
 ): Promise<CustomerDunningRow[]> {
-  return request<CustomerDunningRow[]>("/api/reminders", { signal }, { today });
+  return request<CustomerDunningRow[]>(
+    "/api/reminders",
+    { signal },
+    { today, refresh: refresh ? "true" : undefined },
+  );
 }
 
 /** GET /api/reminders/{cid}/draft → texte du brouillon (ne logue rien). */
