@@ -12,7 +12,8 @@ from decimal import Decimal
 
 import pytest
 
-from core.models import BankTransaction, Invoice, ReminderLevel
+from core.models import (BankTransaction, Invoice, MatchConfidence,
+                         PaymentMatch, ReminderLevel)
 from service.bank_match import BankMatchService
 from service.ledger import LedgerService
 from service.reminders.drafts import DraftGenerator
@@ -47,12 +48,24 @@ def _inv(id_: int, number: str, customer_id: int, customer_name: str,
     )
 
 
-def _hsbc(ref: str, label: str, credit: str) -> BankTransaction:
+def _hsbc(ref: str, label: str, credit: str,
+          value_date: date = date(2026, 5, 20)) -> BankTransaction:
     return BankTransaction(
-        ref=ref, value_date=date(2026, 5, 20), op_date=date(2026, 5, 20),
+        ref=ref, value_date=value_date, op_date=value_date,
         label=label, client_ref=None, credit=Decimal(credit), debit=None,
         source="hsbc",
     )
+
+
+class FakePennylaneWithBoundary(FakePennylane):
+    """Faux client qui expose en plus une frontière comptable HSBC fixe."""
+
+    def __init__(self, invoices: list[Invoice], boundary: date | None) -> None:
+        super().__init__(invoices)
+        self._boundary = boundary
+
+    def hsbc_accounting_boundary(self) -> date | None:
+        return self._boundary
 
 
 @pytest.fixture
@@ -141,6 +154,37 @@ def test_revolut_match_blocks_payment(storage):
 
     rows = service.dunning_view(TODAY)
     assert {r.customer.id: r.blocked_by_payment for r in rows} == {20: True}
+
+
+def test_hsbc_boundary_purges_absorbed_and_filters_blocking(storage):
+    """Frontière HSBC : un match manuel AVANT la frontière est purgé et ne bloque
+    pas ; un match APRÈS la frontière bloque bien la relance."""
+    boundary = date(2026, 5, 1)
+    invoices = [_inv(1, "260001", 10, "Acme SARL", "100.00")]
+    pennylane = FakePennylaneWithBoundary(invoices, boundary)
+    service = ReminderService(LedgerService(pennylane, storage),
+                              BankMatchService(storage), storage, DraftGenerator())
+
+    # Un match déjà persisté, payé AVANT la frontière -> doit être purgé.
+    storage.save_matches([PaymentMatch(
+        bank_ref="HSBC-OLD", invoice_id=1, invoice_number="260001",
+        customer_name="Acme SARL", amount=Decimal("100.00"),
+        confidence=MatchConfidence.STRONG, matched_invoice_numbers=["260001"],
+        reason="absorbé par le lettrage", date=date(2026, 4, 20))])
+
+    # Virement HSBC manuel daté AVANT la frontière : ne doit pas bloquer.
+    before = _hsbc("HSBC-1", "VIR RECU 260001 ACME", "100.00",
+                   value_date=date(2026, 4, 25))
+    rows = service.dunning_view(TODAY, hsbc_txs=[before])
+    assert {r.customer.id: r.blocked_by_payment for r in rows} == {10: False}
+    # Le match absorbé (<= frontière) a été purgé du storage.
+    assert storage.list_matches() == []
+
+    # Virement HSBC manuel daté APRÈS la frontière : bloque bien.
+    after = _hsbc("HSBC-2", "VIR RECU 260001 ACME", "100.00",
+                  value_date=date(2026, 5, 10))
+    rows = service.dunning_view(TODAY, hsbc_txs=[after])
+    assert {r.customer.id: r.blocked_by_payment for r in rows} == {10: True}
 
 
 def test_recently_reminded_customer_is_masked(env):

@@ -175,6 +175,22 @@ class Storage:
         self._conn.execute("DELETE FROM payment_matches")
         self._conn.commit()
 
+    def clear_matches_before(self, boundary: date) -> int:
+        """Supprime les matchs dont le paiement est antérieur ou égal à ``boundary``.
+
+        ``paid_at`` porte la date de l'opération bancaire. Les paiements
+        ``paid_at <= boundary`` sont déjà absorbés par le lettrage comptable
+        (lignes 411 lettrées, donc hors encours) : on les purge pour ne pas les
+        rejouer dans le blocage des relances. Les matchs sans ``paid_at`` (date
+        inconnue) sont conservés. Retourne le nombre de lignes supprimées.
+        """
+        cur = self._conn.execute(
+            "DELETE FROM payment_matches WHERE paid_at IS NOT NULL AND paid_at <= ?",
+            (boundary.isoformat(),),
+        )
+        self._conn.commit()
+        return cur.rowcount
+
     # --- Cache factures ---
     def cache_invoices(self, invoices: list[Invoice]) -> None:
         """Remplace intégralement le cache factures et met à jour l'horodatage."""

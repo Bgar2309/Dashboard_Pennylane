@@ -29,11 +29,13 @@ def _invoice(id_: int, number: str, customer_id: int = 1,
 
 
 def _match(bank_ref: str, amount: str = "1200.50",
-           confidence: MatchConfidence = MatchConfidence.STRONG) -> PaymentMatch:
+           confidence: MatchConfidence = MatchConfidence.STRONG,
+           paid_at: date | None = None) -> PaymentMatch:
     return PaymentMatch(
         bank_ref=bank_ref, invoice_id=42, invoice_number="260604",
         customer_name="ACME", amount=Decimal(amount), confidence=confidence,
         matched_invoice_numbers=["260604", "260605"], reason="num + montant",
+        date=paid_at,
     )
 
 
@@ -139,6 +141,29 @@ def test_clear_matches(store):
     store.save_matches([_match("A"), _match("B")])
     store.clear_matches()
     assert store.list_matches() == []
+
+
+def test_clear_matches_before_boundary(store):
+    """Purge les matchs payés <= frontière, garde ceux payés après."""
+    boundary = date(2026, 4, 30)
+    store.save_matches([
+        _match("OLD", paid_at=date(2026, 4, 15)),   # avant -> supprimé
+        _match("EDGE", paid_at=boundary),            # = frontière -> supprimé
+        _match("NEW", paid_at=date(2026, 5, 10)),    # après -> conservé
+    ])
+
+    removed = store.clear_matches_before(boundary)
+    assert removed == 2
+
+    remaining = {m.bank_ref for m in store.list_matches()}
+    assert remaining == {"NEW"}
+
+
+def test_clear_matches_before_keeps_undated(store):
+    """Un match sans paid_at (date inconnue) n'est jamais purgé."""
+    store.save_matches([_match("NODATE", paid_at=None)])
+    assert store.clear_matches_before(date(2026, 5, 1)) == 0
+    assert {m.bank_ref for m in store.list_matches()} == {"NODATE"}
 
 
 def test_list_matches_since(store):

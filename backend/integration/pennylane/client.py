@@ -52,6 +52,13 @@ _MAX_RETRIES = 5
 # Pause entre deux pages pour ménager le rate limit (secondes).
 _PAGE_PAUSE = 0.2
 
+# Journal de banque HSBC = BQ1 (type "finances", label "Journal de trésorerie
+# - EHS"). C'est le SEUL journal de banque dans le périmètre v1 ; les journaux
+# Revolut (BQ2..BQ6) en sont exclus. Sa dernière écriture donne la « frontière
+# comptable » : jusqu'à cette date le lettrage 411 est fiable (les paiements y
+# sont déjà reflétés), au-delà on s'appuie sur l'upload HSBC manuel.
+HSBC_BANK_JOURNAL_ID = 6716577
+
 # Comptes auxiliaires clients : préfixe de numéro (411XXX).
 _CUSTOMER_ACCOUNT_PREFIX = "411"
 # Comptes génériques « Clients » sans tiers rattaché : à exclure de l'encours.
@@ -369,6 +376,32 @@ class PennylaneClient:
                 remaining_amount=amount,
             ))
         return out
+
+    def hsbc_accounting_boundary(self) -> date | None:
+        """Frontière comptable HSBC : date de la dernière écriture du journal BQ1.
+
+        Lit l'écriture la plus récente du journal de banque HSBC
+        (``HSBC_BANK_JOURNAL_ID``) via ``/ledger_entries`` trié par date
+        décroissante, limité à 1, et retourne sa date. Rend ``None`` si le
+        journal ne contient aucune écriture.
+
+        Jusqu'à cette date (incluse), les paiements clients sont déjà reflétés
+        dans l'encours (lignes 411 lettrées, donc absentes) : seuls les
+        rapprochements HSBC manuels POSTÉRIEURS servent encore au blocage des
+        relances.
+        """
+        params = {
+            "filter": json.dumps(
+                [{"field": "journal_id", "operator": "eq",
+                  "value": HSBC_BANK_JOURNAL_ID}]),
+            "sort": "-date",
+            "limit": 1,
+        }
+        payload = self._get("/ledger_entries", params)
+        items = payload.get("items") or []
+        if not items:
+            return None
+        return self._date(items[0].get("date"))
 
     def get_invoice(self, invoice_id: int) -> Invoice:
         raw = self._get(f"/customer_invoices/{invoice_id}")
