@@ -214,6 +214,89 @@ def test_get_cached_invoices_empty(store):
     assert store.get_cached_invoices() == []
 
 
+# --- hidden_customers ---
+def test_hide_and_list_hidden(store):
+    assert store.list_hidden_customer_ids() == set()
+    assert store.list_hidden() == []
+
+    store.hide_customer(1115754420, "SIGNAUX GIROD")
+    assert store.list_hidden_customer_ids() == {1115754420}
+
+    hidden = store.list_hidden()
+    assert len(hidden) == 1
+    assert hidden[0]["customer_id"] == 1115754420
+    assert hidden[0]["customer_name"] == "SIGNAUX GIROD"
+    assert isinstance(hidden[0]["hidden_at"], str)
+    # hidden_at parseable en datetime ISO
+    assert isinstance(datetime.fromisoformat(hidden[0]["hidden_at"]), datetime)
+
+
+def test_unhide_customer(store):
+    store.hide_customer(42, "ACME")
+    store.hide_customer(43, "WAYNE")
+    store.unhide_customer(42)
+    assert store.list_hidden_customer_ids() == {43}
+    # unhide d'un id absent : sans effet, ne lève pas
+    store.unhide_customer(999)
+    assert store.list_hidden_customer_ids() == {43}
+
+
+def test_hide_customer_idempotent(store):
+    store.hide_customer(42, "ACME")
+    store.hide_customer(42, "ACME RENAMED")  # ré-appel : PK unique, pas de doublon
+    ids = store.list_hidden_customer_ids()
+    assert ids == {42}
+    hidden = store.list_hidden()
+    assert len(hidden) == 1
+    # le nom est rafraîchi
+    assert hidden[0]["customer_name"] == "ACME RENAMED"
+
+
+def test_seed_default_hidden(store):
+    store.seed_default_hidden()
+    ids = store.list_hidden_customer_ids()
+    # exactement les 3 ids précis, pas de variante régionale
+    assert ids == {1115754418, 1115754406, 1115754420}
+    names = {h["customer_id"]: h["customer_name"] for h in store.list_hidden()}
+    assert names[1115754418] == "KELIAS-LACROIX CITY ST HERBLAIN"
+    assert names[1115754406] == "MYSIGNALISATION-PROZON"
+    assert names[1115754420] == "SIGNAUX GIROD"
+
+
+def test_seed_default_hidden_idempotent(store):
+    store.seed_default_hidden()
+    store.seed_default_hidden()  # second appel : pas de doublon
+    assert store.list_hidden_customer_ids() == {1115754418, 1115754406, 1115754420}
+    assert len(store.list_hidden()) == 3
+
+
+def test_seed_default_hidden_isolation(store):
+    """Le seed ne masque QUE les 3 ids ; les variantes/autres clients restent visibles."""
+    store.seed_default_hidden()
+    ids = store.list_hidden_customer_ids()
+    # variantes régionales et autres ids ne sont jamais masqués par le seed
+    for other_id in (1115754419, 1115754421, 1115754407, 1, 999):
+        assert other_id not in ids
+    # un client masqué manuellement coexiste sans être écrasé par le seed
+    store.hide_customer(1, "AUTRE CLIENT")
+    store.seed_default_hidden()
+    assert store.list_hidden_customer_ids() == {
+        1115754418, 1115754406, 1115754420, 1}
+
+
+def test_hidden_persists_across_instances(tmp_path):
+    path = str(tmp_path / "hidden.db")
+    s1 = Storage(path)
+    s1.init_schema()
+    s1.hide_customer(1115754420, "SIGNAUX GIROD")
+    s1.close()
+
+    s2 = Storage(path)
+    s2.init_schema()  # idempotent, ne doit pas effacer la table
+    assert s2.list_hidden_customer_ids() == {1115754420}
+    s2.close()
+
+
 # --- persistance réelle (reouverture du fichier) ---
 def test_persistence_across_instances(tmp_path):
     path = str(tmp_path / "persist.db")

@@ -18,6 +18,17 @@ from core.models import (Invoice, MatchConfidence, PaymentMatch,
 # Clé du cache_meta : horodatage du dernier remplissage du cache factures.
 _CACHE_TS_KEY = "invoices_cached_at"
 
+# Gros payeurs fiables masqués par défaut (seed_default_hidden).
+# Ids exacts des comptes 411 — surtout PAS les variantes régionales.
+#   411LACR  KELIAS-LACROIX CITY ST HERBLAIN
+#   411MYS   MYSIGNALISATION-PROZON
+#   411GIR   SIGNAUX GIROD
+_DEFAULT_HIDDEN: tuple[tuple[int, str], ...] = (
+    (1115754418, "KELIAS-LACROIX CITY ST HERBLAIN"),
+    (1115754406, "MYSIGNALISATION-PROZON"),
+    (1115754420, "SIGNAUX GIROD"),
+)
+
 
 class Storage:
     """Couche de persistance SQLite. Stocke et rend, sans logique métier."""
@@ -77,6 +88,12 @@ class Storage:
             CREATE TABLE IF NOT EXISTS cache_meta (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS hidden_customers (
+                customer_id   INTEGER PRIMARY KEY,
+                customer_name TEXT    NOT NULL,
+                hidden_at     TEXT    NOT NULL
             );
 
             CREATE INDEX IF NOT EXISTS idx_reminders_customer
@@ -230,6 +247,56 @@ class Storage:
             return None
         cached_at = datetime.fromisoformat(row["value"])
         return (datetime.now() - cached_at).total_seconds()
+
+    # --- Clients masqués (gros payeurs fiables, exclus des relances) ---
+    def hide_customer(self, customer_id: int, customer_name: str) -> None:
+        """Masque un client (idempotent : ré-appel rafraîchit nom et horodatage)."""
+        self._conn.execute(
+            "INSERT INTO hidden_customers (customer_id, customer_name, hidden_at) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(customer_id) DO UPDATE SET "
+            "customer_name = excluded.customer_name, hidden_at = excluded.hidden_at",
+            (customer_id, customer_name, datetime.now().isoformat()),
+        )
+        self._conn.commit()
+
+    def unhide_customer(self, customer_id: int) -> None:
+        """Réaffiche un client (sans effet s'il n'était pas masqué)."""
+        self._conn.execute(
+            "DELETE FROM hidden_customers WHERE customer_id = ?", (customer_id,)
+        )
+        self._conn.commit()
+
+    def list_hidden_customer_ids(self) -> set[int]:
+        """Ensemble des ids de clients masqués (lookup rapide)."""
+        rows = self._conn.execute(
+            "SELECT customer_id FROM hidden_customers"
+        ).fetchall()
+        return {row["customer_id"] for row in rows}
+
+    def list_hidden(self) -> list[dict]:
+        """Clients masqués : [{customer_id, customer_name, hidden_at}] (plus récent d'abord)."""
+        rows = self._conn.execute(
+            "SELECT customer_id, customer_name, hidden_at FROM hidden_customers "
+            "ORDER BY hidden_at DESC, customer_id"
+        ).fetchall()
+        return [
+            {
+                "customer_id": row["customer_id"],
+                "customer_name": row["customer_name"],
+                "hidden_at": row["hidden_at"],
+            }
+            for row in rows
+        ]
+
+    def seed_default_hidden(self) -> None:
+        """Masque les 3 gros payeurs fiables par défaut. Idempotent, appelé manuellement.
+
+        Ne masque QUE ces ids précis (pas les variantes régionales Girod
+        EST/OUEST/NORD/SUD, ni Lacroix Océan Indien, ni Kelias Mayotte).
+        """
+        for customer_id, customer_name in _DEFAULT_HIDDEN:
+            self.hide_customer(customer_id, customer_name)
 
     def close(self) -> None:
         """Ferme la connexion SQLite."""
