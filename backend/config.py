@@ -26,7 +26,21 @@ EXCLUDED_CUSTOMER_NAMES = [
     name.strip()
     for name in os.environ.get(
         "EXCLUDED_CUSTOMER_NAMES",
-        "Kelias,Lacroix city st herblain,MySignalisation Prozon,Signior Girod",
+        "Kelias,Lacroix city st herblain,MySignalisation Prozon",
     ).split(",")
     if name.strip()
+]
+
+# Clients exclus du poste client par NUMÉRO de compte 411 EXACT. Contrairement à
+# EXCLUDED_CUSTOMER_NAMES (correspondance par sous-chaîne du libellé, qui écarte
+# d'un coup toute une famille au nom proche), la correspondance est ici EXACTE
+# sur le numéro : on cible précisément un compte. Ex. « 411GIR » (SIGNAUX GIROD)
+# sans écarter « SIGNAUX GIROD EST » (411SIG), « OUEST » (411SGO), etc.
+# Liste de numéros séparés par des virgules ; surchargeable via la variable d'env
+# homonyme. La comparaison ignore la casse et les espaces.
+EXCLUDED_CUSTOMER_ACCOUNT_NUMBERS = [
+    number.strip()
+    for number in os.environ.get(
+        "EXCLUDED_CUSTOMER_ACCOUNT_NUMBERS", "411GIR").split(",")
+    if number.strip()
 ]

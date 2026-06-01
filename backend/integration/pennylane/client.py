@@ -78,11 +78,19 @@ _GENERIC_CUSTOMER_ACCOUNTS = {"411", "41102", "4111", "4117", "41106"}
 _DEFAULT_PAYMENT_TERM_DAYS = 30
 
 # Marqueur des reports à nouveau : Pennylane pose le solde d'ouverture de
-# l'exercice comme une écriture datée du 1er janvier dont le libellé contient
-# « A-Nouveau » (débit ET crédit). Ces lignes servent au calcul du solde et à
-# l'imputation FIFO mais ne sont pas des factures à relancer. Le rapprochement
-# (anti-doublon A-Nouveau, annulations, FIFO) est délégué à ``core.reconcile``.
+# l'exercice comme une écriture datée du 1er janvier dont le libellé PEUT
+# contenir « A-Nouveau ». Ces lignes servent au calcul du solde et à l'imputation
+# FIFO mais ne sont pas des factures à relancer. Le rapprochement (anti-doublon
+# A-Nouveau, annulations, FIFO) est délégué à ``core.reconcile``.
 _OPENING_BALANCE_MARKER = "a-nouveau"
+# Type d'API des journaux d'« à-nouveaux ». ATTENTION : les reports d'ouverture
+# saisis par Pennylane dans ce journal portent un libellé qui reprend la facture
+# d'origine (« 2025-11-05 – Factures clients - 411XXX »), SANS le mot
+# « A-Nouveau ». Se fier au seul libellé laissait passer ces reports, qui
+# doublonnaient alors les factures déjà présentes dans la fenêtre (double
+# comptage). On identifie donc un report par son JOURNAL (ce type), le libellé
+# ne servant plus que de filet de sécurité.
+_CARRYOVER_JOURNAL_TYPE = "carryover"
 
 
 def _normalize_name(text: Any) -> str:
@@ -125,6 +133,9 @@ class PennylaneClient:
         # Cache id compte auxiliaire 411XXX -> libellé du compte (= nom du tiers),
         # alimenté par ``list_customer_ledger_accounts``.
         self._ledger_account_names: dict[int, str] = {}
+        # Cache des ids de journaux d'à-nouveaux (type "carryover"), résolus une
+        # seule fois via ``/journals`` (None tant que non chargé).
+        self._carryover_journal_ids: set[int] | None = None
 
     # ------------------------------------------------------------------ #
     # Cycle de vie
@@ -370,6 +381,11 @@ class PennylaneClient:
         # vitesse) et il sort des relances / encours / stats.
         excluded = [n for n in (_normalize_name(name)
                                 for name in config.EXCLUDED_CUSTOMER_NAMES) if n]
+        # Numéros de compte exclus par correspondance EXACTE (casse/espaces
+        # ignorés) : cible un compte précis sans écarter ses voisins homonymes.
+        excluded_numbers = {n.strip().upper()
+                            for n in config.EXCLUDED_CUSTOMER_ACCOUNT_NUMBERS
+                            if n.strip()}
         accounts: dict[int, str] = {}
         for raw in self._paginate("/ledger_accounts", params):
             if raw.get("type") != "customer":
@@ -378,6 +394,9 @@ class PennylaneClient:
                 continue  # compte désactivé -> hors encours
             number = str(raw.get("number") or "")
             if number in _GENERIC_CUSTOMER_ACCOUNTS:
+                continue
+            if number.upper() in excluded_numbers:
+                logger.info("Compte client exclu du poste (numéro) : %s", number)
                 continue
             label = raw.get("label") or number
             norm_label = _normalize_name(label)
@@ -450,24 +469,51 @@ class PennylaneClient:
             account_id = account.get("id") or 0
             by_account.setdefault(account_id, []).append(raw)
 
+        carryover = self._get_carryover_journal_ids()
         out: list[Invoice] = []
         for account_id, account_lines in by_account.items():
-            raw_lines = [self._raw_reconcile_line(raw) for raw in account_lines]
+            raw_lines = [self._raw_reconcile_line(raw, carryover)
+                         for raw in account_lines]
             customer_name = names.get(account_id, "")
             for item in reconcile.reconcile_account(raw_lines, window_start):
                 out.append(self._open_item_to_invoice(
                     item, account_id, customer_name))
         return out
 
-    def _raw_reconcile_line(self, raw: dict[str, Any]) -> reconcile.RawLine:
-        """Traduit une ligne d'écriture brute Pennylane en ``reconcile.RawLine``."""
+    def _get_carryover_journal_ids(self) -> set[int]:
+        """Ids des journaux d'à-nouveaux (type « carryover »), mis en cache.
+
+        Une seule requête ``/journals`` par instance. Les reports d'ouverture y
+        sont saisis sans toujours porter « A-Nouveau » dans leur libellé : c'est
+        le journal qui les identifie de façon fiable (cf. ``_CARRYOVER_JOURNAL_TYPE``).
+        """
+        if self._carryover_journal_ids is None:
+            self._carryover_journal_ids = {
+                raw["id"] for raw in self._paginate("/journals")
+                if raw.get("type") == _CARRYOVER_JOURNAL_TYPE
+            }
+        return self._carryover_journal_ids
+
+    def _raw_reconcile_line(self, raw: dict[str, Any],
+                            carryover_journal_ids: set[int]) -> reconcile.RawLine:
+        """Traduit une ligne d'écriture brute Pennylane en ``reconcile.RawLine``.
+
+        Une ligne est un report d'ouverture (« A-Nouveau ») si elle provient d'un
+        journal d'à-nouveaux (type « carryover ») OU si son libellé porte le
+        marqueur « A-Nouveau » (filet de sécurité). Repérer le report par son
+        seul libellé laissait passer les A-Nouveau dont Pennylane recopie le
+        libellé de la facture d'origine : ils doublonnaient l'encours.
+        """
+        journal = raw.get("journal") or {}
+        is_opening = (journal.get("id") in carryover_journal_ids
+                      or self._is_opening_balance(raw.get("label")))
         return reconcile.RawLine(
             id=raw["id"],
             date=self._date(raw.get("date")),
             debit=self._decimal(raw.get("debit")),
             credit=self._decimal(raw.get("credit")),
             label=raw.get("label") or "",
-            is_opening_balance=self._is_opening_balance(raw.get("label")),
+            is_opening_balance=is_opening,
             invoice_number=self._number_from_line_label(raw.get("label")),
         )
 

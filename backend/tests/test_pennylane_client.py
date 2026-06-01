@@ -222,6 +222,21 @@ def _ledger_entries_response(request: httpx.Request) -> httpx.Response:
     return httpx.Response(200, json=_ledger_entries_payload["current"])
 
 
+# Journaux (/journals) : on n'a besoin que du type pour repérer les à-nouveaux.
+# Le journal AN (type "carryover") identifie les reports d'ouverture, dont le
+# libellé ne contient pas toujours « A-Nouveau ».
+JOURNALS_RESPONSE = {
+    "items": [
+        {"id": 5659572, "code": "AN", "label": "Journal des à-nouveaux",
+         "type": "carryover"},
+        {"id": 6674406, "code": "VTE", "label": "VTE", "type": "custom"},
+        {"id": HSBC_JOURNAL_ID, "code": "BQ1",
+         "label": "Journal de trésorerie - EHS", "type": "finances"},
+    ],
+    "has_more": False, "next_cursor": None,
+}
+
+
 TRANSACTIONS_PAGES = {
     None: {
         "items": [
@@ -263,6 +278,8 @@ def make_handler(calls: list[httpx.Request] | None = None):
             return _ledger_lines_response(request)
         if path.endswith("/ledger_entries"):
             return _ledger_entries_response(request)
+        if path.endswith("/journals"):
+            return httpx.Response(200, json=JOURNALS_RESPONSE)
         if path.endswith("/transactions"):
             return _page_for(TRANSACTIONS_PAGES, request)
         if "/customer_invoices/" in path:
@@ -382,6 +399,24 @@ def test_list_customer_ledger_accounts_excludes_configured_names(client, monkeyp
     accounts = client.list_customer_ledger_accounts()
     # 1003 "PROZON" et 1002 "Brady Groupe" sont exclus ; les autres restent.
     assert accounts == {1001: "SIGNAL ET DECO", 1004: "OLDCO"}
+
+
+def test_list_customer_ledger_accounts_excludes_by_exact_account_number(
+        client, monkeypatch):
+    """Exclusion par NUMÉRO exact : cible un compte précis sans toucher ses
+    voisins, et ne réagit PAS à un préfixe partiel (contrairement aux noms)."""
+    monkeypatch.setattr(config, "EXCLUDED_CUSTOMER_ACCOUNT_NUMBERS", ["411SIGN"])
+    accounts = client.list_customer_ledger_accounts()
+    assert 1001 not in accounts  # 411SIGN écarté pile
+    assert {1002, 1003, 1004} <= set(accounts)  # les autres restent
+
+    # Casse ignorée.
+    monkeypatch.setattr(config, "EXCLUDED_CUSTOMER_ACCOUNT_NUMBERS", ["411sign"])
+    assert 1001 not in client.list_customer_ledger_accounts()
+
+    # Correspondance EXACTE : un fragment de numéro n'exclut rien.
+    monkeypatch.setattr(config, "EXCLUDED_CUSTOMER_ACCOUNT_NUMBERS", ["411SI"])
+    assert 1001 in client.list_customer_ledger_accounts()
 
 
 def test_excluded_account_lines_are_not_fetched(client, calls, monkeypatch):
@@ -532,6 +567,8 @@ def test_anouveau_duplicating_window_invoices_yields_single_residual():
         if path.endswith("/ledger_entry_lines"):
             return httpx.Response(200, json={
                 "items": account_lines, "has_more": False, "next_cursor": None})
+        if path.endswith("/journals"):
+            return httpx.Response(200, json=JOURNALS_RESPONSE)
         return httpx.Response(404, json={"error": f"unhandled {path}"})
 
     http = httpx.Client(base_url=BASE_URL, transport=httpx.MockTransport(handler))
@@ -551,6 +588,81 @@ def test_anouveau_duplicating_window_invoices_yields_single_residual():
     assert inv.remaining_amount == Decimal("2000.0")
     # Aucune Invoice n'est issue de la ligne A-Nouveau doublon.
     assert 6004 not in {i.id for i in invoices}
+
+
+def test_anouveau_detected_by_carryover_journal_not_label():
+    """Régression LE SIGNALETIQUE DOM-TOM : un A-Nouveau saisi dans le journal
+    « carryover » avec un libellé reprenant la facture d'origine (SANS le mot
+    « A-Nouveau ») doit être reconnu comme report et neutralisé.
+
+    Compte : une facture 2025 impayée (2000), son report A-Nouveau au 1er janvier
+    2026 (libellé « 2025-09-01 – Factures clients - 411X », journal AN), puis le
+    paiement 2026. Détecté par journal, le report est exclu → une seule créance,
+    et ce n'est PAS le 1er janvier."""
+    account_lines = [
+        {"id": 7001, "label": "FAC GAMMA – 250901", "debit": "2000.0",
+         "credit": "0.0", "date": "2025-09-01",
+         "journal": {"id": 6674406},  # journal de vente, pas un report
+         "ledger_account": {"id": 3001, "number": "411DOM"},
+         "ledger_entry": {"id": 95001}},
+        {"id": 7002, "label": "2025-09-01 – Factures clients - 411DOM",
+         "debit": "2000.0", "credit": "0.0", "date": "2026-01-01",
+         "journal": {"id": 5659572},  # journal AN (carryover) : c'est un report
+         "ledger_account": {"id": 3001, "number": "411DOM"},
+         "ledger_entry": {"id": 95002}},
+        {"id": 7003, "label": "", "debit": "0.0", "credit": "2000.0",
+         "date": "2026-01-20",
+         "journal": {"id": 7394400},  # règlement
+         "ledger_account": {"id": 3001, "number": "411DOM"},
+         "ledger_entry": {"id": 95003}},
+        {"id": 7004, "label": "FAC GAMMA 2026 – 260010", "debit": "1500.0",
+         "credit": "0.0", "date": "2026-03-01",
+         "journal": {"id": 6674406},
+         "ledger_account": {"id": 3001, "number": "411DOM"},
+         "ledger_entry": {"id": 95004}},
+    ]
+    accounts_payload = {
+        "items": [{"id": 3001, "number": "411DOM", "label": "DOM CLIENT",
+                   "type": "customer", "enabled": True, "letterable": True}],
+        "has_more": False, "next_cursor": None,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        path = request.url.path
+        if path.endswith("/ledger_accounts"):
+            return httpx.Response(200, json=accounts_payload)
+        if path.endswith("/ledger_entry_lines"):
+            return httpx.Response(200, json={
+                "items": account_lines, "has_more": False, "next_cursor": None})
+        if path.endswith("/journals"):
+            return httpx.Response(200, json=JOURNALS_RESPONSE)
+        return httpx.Response(404, json={"error": f"unhandled {path}"})
+
+    http = httpx.Client(base_url=BASE_URL, transport=httpx.MockTransport(handler))
+    c = PennylaneClient(token="t", base_url=BASE_URL, client=http)
+    try:
+        invoices = c.list_open_invoices()
+    finally:
+        c.close()
+
+    # Le report A-Nouveau (7002) est neutralisé : seule la facture 2026 reste due.
+    assert len(invoices) == 1
+    inv = invoices[0]
+    assert inv.id == 7004
+    assert inv.amount == Decimal("1500.0")
+    assert inv.remaining_amount == Decimal("1500.0")
+    assert inv.date == date(2026, 3, 1)
+    # Plus aucun « Facture du 01/01/2026 » fantôme.
+    assert 7002 not in {i.id for i in invoices}
+
+
+def test_carryover_journal_ids_resolved_once(client, calls):
+    """Le journal des à-nouveaux n'est résolu qu'une fois (cache d'instance)."""
+    client.list_open_invoices()
+    client.list_open_invoices()
+    journal_calls = [r for r in calls if r.url.path.endswith("/journals")]
+    assert len(journal_calls) == 1
 
 
 def test_since_filter_sent_as_json(client, calls):
